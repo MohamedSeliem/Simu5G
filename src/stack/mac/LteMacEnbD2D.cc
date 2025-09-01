@@ -2,6 +2,7 @@
 //                  Simu5G
 //
 // Authors: Giovanni Nardini, Giovanni Stea, Antonio Virdis (University of Pisa)
+// Editor: Mohamed Seliem (University College Cork)
 //
 // This file is part of a software released under the license included in file
 // "license.pdf". Please read LICENSE and README files before using it.
@@ -155,6 +156,16 @@ void LteMacEnbD2D::macPduUnmake(cPacket *pktAux)
             connDescIn_[cid] = toStore;
         }
 
+        EV << "LteMacEnbD2D: Lcid --->"<< (int)lcid << " Cid: " << cid <<endl;
+        QfiContextManager* mgr = QfiContextManager::getInstance();
+        mgr->registerQfiForCid(cid, (int)lcid + 1);
+
+        for (const auto& [cid, qfi] : mgr->getCidToQfiMap()) {
+            EV << "CID " << cid << " → QFIs: ";
+            EV << qfi << " ";
+            EV << endl;
+        }
+
         sendUpperPackets(upPkt);
     }
 
@@ -162,13 +173,32 @@ void LteMacEnbD2D::macPduUnmake(cPacket *pktAux)
         // Extract CE
         // TODO: see if for cid or lcid
         MacBsr *bsr = check_and_cast<MacBsr *>(macPkt->popCe());
-        auto lteInfo = pkt->getTag<UserControlInfo>();
-        LogicalCid lcid = lteInfo->getLcid();  // one of SHORT_BSR or D2D_MULTI_SHORT_BSR
+	/*
+	* 
+	* Fixing BSR CE Handling for Multiple CIDs
+	*
+        * auto lteInfo = pkt->getTag<UserControlInfo>();
+        * LogicalCid lcid = lteInfo->getLcid();  // one of SHORT_BSR or D2D_MULTI_SHORT_BSR
+	*
+        * MacCid cid = idToMacCid(lteInfo->getSourceId(), lcid); // this way, different connections from the same UE (e.g. one UL and one D2D)
+        *                                                       // obtain different CIDs. With the inverse operation, you can get
+        *                                                       // the LCID and discover if the connection is UL or D2D
+	* bufferizeBsr(bsr, cid);
+	*/
 
-        MacCid cid = idToMacCid(lteInfo->getSourceId(), lcid); // this way, different connections from the same UE (e.g. one UL and one D2D)
-                                                               // obtain different CIDs. With the inverse operation, you can get
-                                                               // the LCID and discover if the connection is UL or D2D
-        bufferizeBsr(bsr, cid);
+	for (const auto& [cid, info] : connDescIn_) {
+		LogicalCid lcid = info.getLcid();
+    		MacNodeId nodeId = info.getSourceId();
+    		MacCid derivedCid = idToMacCid(nodeId, lcid);
+
+    		EV << "BSR CE: Cached FlowControlInfo → NodeId=" << nodeId
+       		<< ", LCID=" << (int)lcid
+       		<< ", CID=" << derivedCid
+       		<< ", BSR size=" << bsr->getSize()
+       		<< ", TS=" << bsr->getTimestamp() << endl;
+
+    		bufferizeBsr(bsr, derivedCid);
+	}        
     }
     pkt->insertAtFront(macPkt);
 

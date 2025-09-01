@@ -20,6 +20,7 @@ simple NRPdcpRrcUe extends LtePdcpRrcUeD2D
 {
     parameters:
         @class("NRPdcpRrcUe");
+        int drbIndex;  // NEW: passed by compound module
     gates:
         inout nr_DataPort;
         inout nr_EUTRAN_RRC_Sap;

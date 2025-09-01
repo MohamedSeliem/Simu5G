@@ -21,6 +21,7 @@ simple NRPdcpRrcEnb extends LtePdcpRrcEnbD2D
 {
     parameters:
         @class("NRPdcpRrcEnb");
+        int drbIndex;  // NEW: passed by compound module
         string dualConnectivityManagerModule = default("^.dualConnectivityManager");
 }
 
