@@ -1,4 +1,4 @@
-<features cppSourceRoots="src/common" definesFile="src/common/features.h">
+<features cppSourceRoots="src" definesFile="src/simu5g/common/features.h">
  <feature
   id="Simu5G_Cars"
   name="Simu5G Cars"
@@ -6,9 +6,8 @@
   initiallyEnabled = "false"
   requires = ""
   labels = ""
-  nedPackages = "simu5g.nodes.cars
-                 simu5g.simulations.LTE.cars
-                 simu5g.simulations.NR.cars"
+  nedPackages = "simu5g.simulations.lte.cars
+                 simu5g.simulations.nr.cars"
   extraSourceFolders = ""
   compileFlags = ""
   linkerFlags = ""

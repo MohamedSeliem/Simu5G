@@ -16,12 +16,12 @@ import inet.networklayer.ipv4.RoutingTableRecorder;
 import inet.node.ethernet.Eth10G;
 import simu5g.common.binder.Binder;
 import simu5g.common.carrierAggregation.CarrierAggregation;
-import simu5g.nodes.NR.NRUe;
-import simu5g.nodes.NR.gNodeB;
+import simu5g.nodes.NrUe;
+import simu5g.nodes.gNodeB;
 import simu5g.nodes.Upf;
-import simu5g.nodes.mec.MECHost;
-import simu5g.nodes.mec.MECOrchestrator.MecOrchestrator;
-import simu5g.nodes.mec.UALCMP.UALCMP;
+import simu5g.nodes.MecHost;
+import simu5g.mec.orchestrator.MecOrchestrator;
+import simu5g.mec.ualcmp.Ualcmp;
 import simu5g.world.radio.LteChannelControl;
 
 
@@ -61,7 +61,7 @@ network ExtUeAppExample
         }
 
         //# MEC modules
-        mecHost1: MECHost {
+        mecHost1: MecHost {
             @display("p=277,158;is=l");
         }
 
@@ -69,11 +69,11 @@ network ExtUeAppExample
             @display("p=520,158;is=l");
         }
 
-        ualcmp: UALCMP {
+        ualcmp: Ualcmp {
             @display("p=420,157;i=device/smallrouter");
         }
 
-        ue: NRUe {
+        ue: NrUe {
             @display("p=51,259");
         }
 
