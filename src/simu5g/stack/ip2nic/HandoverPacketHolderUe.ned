@@ -25,4 +25,5 @@ simple HandoverPacketHolderUe like IHandoverPacketHolder
         input upperLayerIn;
         input x2In @loose; // required by the interface, but UNUSED
         output stackOut;
+        output hoManagerOut @loose; // to forward packets to handover manager for X2 tunneling
 }
