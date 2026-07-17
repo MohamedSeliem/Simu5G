@@ -216,7 +216,7 @@ void LtePhyBase::sendMulticast(LteAirFrame *frame)
 
             // Create a duplicate frame before sending
             LteAirFrame *frameToSend = frame->dup();
-            sendDirect(frameToSend, 0, frame->getDuration(), receiver, getReceiverGateIndex(receiver, isNrUe(destId)));
+            sendDirect(frameToSend, 0, frame->getDuration(), receiver, getReceiverGateIndex(receiver, isNrUe(destId), destId));
         }
     }
 
@@ -244,11 +244,24 @@ void LtePhyBase::sendUnicast(LteAirFrame *frame)
         delete userControlInfo;
     }
 
-    sendDirect(frame, 0, frame->getDuration(), receiver, getReceiverGateIndex(receiver, isNrUe(dest)));
+    sendDirect(frame, 0, frame->getDuration(), receiver, getReceiverGateIndex(receiver, isNrUe(dest), dest));
 }
 
-int LtePhyBase::getReceiverGateIndex(const cModule *receiver, bool isNr) const
+int LtePhyBase::getReceiverGateIndex(const cModule *receiver, bool isNr, MacNodeId dest) const
 {
+    // nascTime / FRER: if this PHY (the sender -- nodeId_ here is always
+    // the sender's own ID, since sendUnicast()/sendMulticast() are called
+    // on the transmitting PHY) is registered as dest's DC secondary,
+    // route to the receiver's dedicated secondary NR radio gate instead
+    // of the shared nrRadioIn. Falls through to normal behavior if the
+    // receiver has no such gate (e.g. a non-DC-capable UE), rather than
+    // hard-failing.
+    if (isNr && dest != NODEID_NONE && binder_->getDcSecondaryNextHop(dest) == nodeId_) {
+        int secGate = receiver->findGate("nrRadioIn2");
+        if (secGate >= 0)
+            return secGate;
+    }
+
     int gate = (isNr) ? receiver->findGate("nrRadioIn") : receiver->findGate("radioIn");
     if (gate < 0) {
         gate = receiver->findGate("lteRadioIn");
