@@ -1015,7 +1015,21 @@ bool Binder::isDualConnectivityRequired(FlowControlInfo *info)
 
 void Binder::establishUnidirectionalDataConnection(FlowControlInfo *info)
 {
-    bool dualConnected = isDualConnectivityRequired(info);
+    // nascTime / FRER: skip native EN-DC split-bearer entirely for any UE
+    // managed by our own per-DRB secondary-leg routing (see
+    // BearerManagement::dcSecondaryDrbIds_). Without this guard, native
+    // split-bearer fires for EVERY DRB of EVERY dual-tech UE served by a
+    // gNB registered as anyone's Binder-level secondary -- not just the
+    // one DRB nascTime intends to route there. Confirmed via direct trace:
+    // isDualConnectivityRequired() returns true whenever
+    // getMasterNodeOrSelf(nodeB) != nodeB, which registerMasterNode(gnb,
+    // gnb2) makes unconditionally true for gnb2, for all its traffic.
+    MacNodeId ueId = (getNodeTypeById(info->getSourceId()) == UE) ? info->getSourceId()
+                    : (getNodeTypeById(info->getDestId()) == UE) ? info->getDestId()
+                    : NODEID_NONE;
+    bool nascTimeManagedDc = (ueId != NODEID_NONE) && (getDcSecondaryNextHop(ueId) != NODEID_NONE);
+
+    bool dualConnected = !nascTimeManagedDc && isDualConnectivityRequired(info);
     if (!dualConnected) {
         createConnection(info, true);
     }
