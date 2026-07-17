@@ -9,6 +9,8 @@
 // and cannot be removed from it.
 //
 
+#include <sstream>
+
 #include "simu5g/stack/rrc/BearerManagement.h"
 #include "simu5g/stack/rrc/D2DModeController.h"
 #include "simu5g/stack/rrc/Registration.h"
@@ -52,12 +54,32 @@ void BearerManagement::initialize(int stage)
         nrRlcMuxModule.reference(this, "nrRlcMuxModule", false);
         macModule.reference(this, "macModule", true);
         nrMacModule.reference(this, "nrMacModule", false);
+
+        // nascTime / FRER: optional second NR leg -- unresolved (empty)
+        // on any NIC that doesn't have nrRlcMux2/nrMac2.
+        nrRlcMuxModule2.reference(this, "nrRlcMuxModule2", false);
+        nrMacModule2.reference(this, "nrMacModule2", false);
+
+        std::string drbIdsStr = par("dcSecondaryDrbIds").stdstringValue();
+        std::stringstream ss(drbIdsStr);
+        std::string token;
+        while (std::getline(ss, token, ',')) {
+            if (!token.empty())
+                dcSecondaryDrbIds_.insert(std::atoi(token.c_str()));
+        }
     }
 }
 
 void BearerManagement::handleMessage(cMessage *msg)
 {
     throw cRuntimeError("This module does not process messages");
+}
+
+RlcLeg BearerManagement::legForDrb(int drbId, bool isNrUeSide) const
+{
+    if (isNrUeSide && dcSecondaryDrbIds_.count(drbId) && nrRlcMuxModule2 && nrMacModule2)
+        return RlcLeg::NR_SECONDARY;
+    return isNrUeSide ? RlcLeg::NR_PRIMARY : RlcLeg::LTE;
 }
 
 void BearerManagement::createIncomingConnection(FlowControlInfo *lteInfo, bool withPdcp)
@@ -71,22 +93,40 @@ void BearerManagement::createIncomingConnection(FlowControlInfo *lteInfo, bool w
 
     ASSERT(lteInfo->getDestId() == registration_->getLteNodeId() || lteInfo->getDestId() == registration_->getNrNodeId() || lteInfo->getMulticastGroupId() != NODEID_NONE);
 
-    // Create MAC incoming connection
     FlowDescriptor desc = FlowDescriptor::fromFlowControlInfo(*lteInfo);
     MacNodeId senderId = desc.getSourceId();
-    auto mac = (registration_->getNodeType()==UE && isNrUe(lteInfo->getDestId())) ? nrMacModule.get() : macModule.get(); //TODO FIXME! DOES NOT WORK FOR MULTICAST!!!!!
+    bool isNrUeSide = (registration_->getNodeType()==UE && isNrUe(lteInfo->getDestId())); //TODO FIXME! DOES NOT WORK FOR MULTICAST!!!!!
+
+    // nascTime / FRER: three-way leg selection, was binary isNr.
+    RlcLeg leg = legForDrb(desc.getDrbId(), isNrUeSide);
+
+    auto mac = (leg == RlcLeg::NR_SECONDARY) ? nrMacModule2.get()
+             : (leg == RlcLeg::NR_PRIMARY)   ? nrMacModule.get()
+                                              : macModule.get();
     LogicalCid lcid = mac->drbIdToLcid(desc.getDrbId());
     MacCid cid = MacCid(senderId, lcid);
     mac->createIncomingConnection(cid, desc);
 
     // RLC entity creation
     DrbKey rlcId = ctrlInfoToRxDrbKey(lteInfo);
-    bool isNr = (registration_->getNodeType()==UE && isNrUe(lteInfo->getDestId())); //TODO FIXME! DOES NOT WORK FOR MULTICAST!!!!!
-    auto *rlcMux = isNr ? nrRlcMuxModule.get() : rlcMuxModule.get();
-    createAndInstallRlcRxBuffer(rlcId, lteInfo, rlcMux, isNr);
+    auto *rlcMux = (leg == RlcLeg::NR_SECONDARY) ? nrRlcMuxModule2.get()
+                 : (leg == RlcLeg::NR_PRIMARY)   ? nrRlcMuxModule.get()
+                                                  : rlcMuxModule.get();
+    // createAndInstallRlcRxBuffer still takes a bool isNr (unchanged) --
+    // it only affects entity naming/param wiring (setRlcEntityParams uses
+    // isNr to pick "^.nrMac"/"^.mac"), which is correct for NR_SECONDARY
+    // too since its entities should reference nrMac2 the same way, not a
+    // third naming scheme.
+    bool isNrEntity = (leg != RlcLeg::LTE);
+    createAndInstallRlcRxBuffer(rlcId, lteInfo, rlcMux, isNrEntity);
 
     // PDCP entity creation
-    auto *pdcpMux = check_and_cast<UpperMux *>(nicModule_->getSubmodule("pdcpMux"));
+    // nascTime / FRER: NR_SECONDARY uses pdcpMux2, a genuinely separate
+    // instance -- unlike RLC, the primary NR leg shares one pdcpMux with
+    // LTE natively, so this split didn't previously exist at the PDCP layer.
+    auto *pdcpMux = (leg == RlcLeg::NR_SECONDARY)
+        ? check_and_cast<UpperMux *>(nicModule_->getSubmodule("pdcpMux2"))
+        : check_and_cast<UpperMux *>(nicModule_->getSubmodule("pdcpMux"));
     auto *pdcpDcMux = dynamic_cast<DcMux *>(nicModule_->getSubmodule("pdcpDcMux")); // nullptr on UEs (no X2)
 
     if (withPdcp) {
@@ -98,18 +138,22 @@ void BearerManagement::createIncomingConnection(FlowControlInfo *lteInfo, bool w
         module->buildInside();
         setEntityDisplayPosition(module, true, rlcMux, num(id.getDrbId()));
 
-        // Wire RLC RX out → PDCP RX in (direct per-DRB connection)
-        auto rlcIt = (isNrUe(lteInfo->getDestId()) ? nrRlcRxEntities_ : rlcRxEntities_).find(rlcId);
-        ASSERT(rlcIt != (isNrUe(lteInfo->getDestId()) ? nrRlcRxEntities_ : rlcRxEntities_).end());
+        // nascTime / FRER: select the correct RLC RX registry for the leg.
+        auto& rxRegistry = (leg == RlcLeg::NR_SECONDARY) ? nrRlcRxEntities2_
+                          : (leg == RlcLeg::NR_PRIMARY)   ? nrRlcRxEntities_
+                                                           : rlcRxEntities_;
+        auto rlcIt = rxRegistry.find(rlcId);
+        ASSERT(rlcIt != rxRegistry.end());
         rlcIt->second->gate("out")->connectTo(module->gate("in"));
 
-        // Wire entity out gate → UpperMux fromRxEntity
         int fromIdx = pdcpMux->gateSize("fromRxEntity");
         pdcpMux->setGateSize("fromRxEntity", fromIdx + 1);
         module->gate("out")->connectTo(pdcpMux->gate("fromRxEntity", fromIdx));
 
-        // Wire DcMux → entity dcIn gate (for UL X2 dispatch, eNB only)
-        if (pdcpDcMux && module->hasGate("dcIn")) {
+        // DcMux/X2 wiring is native-DC-only and never applies to
+        // NR_SECONDARY (which has no pdcpDcMux of its own -- it's a
+        // fully independent DRB, not a split-bearer bypass leg).
+        if (leg != RlcLeg::NR_SECONDARY && pdcpDcMux && module->hasGate("dcIn")) {
             int dcIdx = pdcpDcMux->gateSize("toRxEntity");
             pdcpDcMux->setGateSize("toRxEntity", dcIdx + 1);
             pdcpDcMux->gate("toRxEntity", dcIdx)->connectTo(module->gate("dcIn"));
@@ -118,11 +162,12 @@ void BearerManagement::createIncomingConnection(FlowControlInfo *lteInfo, bool w
         module->scheduleStart(simTime());
         module->callInitialize();
         auto *rxEnt = check_and_cast<PdcpRxEntityBase *>(module);
-        pdcpRxEntities_[id] = rxEnt;
+        (leg == RlcLeg::NR_SECONDARY ? pdcpRxEntities2_ : pdcpRxEntities_)[id] = rxEnt;
     }
     else {
-        // DC secondary node: create bypass RX entity (forwards UL to master via X2)
-        ASSERT(pdcpDcMux != nullptr); // bypass entities are eNB-only
+        // Native DC bypass path -- eNB-only, X2-based, unrelated to
+        // NR_SECONDARY. Unchanged from stock behavior.
+        ASSERT(pdcpDcMux != nullptr);
         DrbKey id = DrbKey(lteInfo->getSourceId(), lteInfo->getDrbId());
         std::string name = "pdcp-bypass-rx-" + std::to_string(num(id.getNodeId())) + "-" + std::to_string(num(id.getDrbId()));
         auto *module = pdcpBypassRxEntityModuleType_->create(name.c_str(), nicModule_);
@@ -130,12 +175,10 @@ void BearerManagement::createIncomingConnection(FlowControlInfo *lteInfo, bool w
         module->buildInside();
         setEntityDisplayPosition(module, true, rlcMux, num(id.getDrbId()));
 
-        // Wire RLC RX out → bypass PDCP RX in (direct per-DRB connection)
-        auto rlcIt2 = (isNrUe(lteInfo->getDestId()) ? nrRlcRxEntities_ : rlcRxEntities_).find(rlcId);
-        ASSERT(rlcIt2 != (isNrUe(lteInfo->getDestId()) ? nrRlcRxEntities_ : rlcRxEntities_).end());
+        auto rlcIt2 = rlcRxEntities_.find(rlcId);
+        ASSERT(rlcIt2 != rlcRxEntities_.end());
         rlcIt2->second->gate("out")->connectTo(module->gate("in"));
 
-        // Wire entity out gate → DcMux (bypass RX sends to X2 via DcMux)
         int fromIdx = pdcpDcMux->gateSize("fromEntity");
         pdcpDcMux->setGateSize("fromEntity", fromIdx + 1);
         module->gate("out")->connectTo(pdcpDcMux->gate("fromEntity", fromIdx));
@@ -158,31 +201,40 @@ void BearerManagement::createOutgoingConnection(FlowControlInfo *lteInfo, bool w
 
     ASSERT(lteInfo->getSourceId() == registration_->getLteNodeId() || lteInfo->getSourceId() == registration_->getNrNodeId());
 
-    // Create MAC outgoing connection
     FlowDescriptor desc = FlowDescriptor::fromFlowControlInfo(*lteInfo);
     MacNodeId destId = desc.getDestId();
-    auto mac = (registration_->getNodeType()==UE && isNrUe(lteInfo->getSourceId())) ? nrMacModule.get() : macModule.get();
+    bool isNrUeSide = (registration_->getNodeType()==UE && isNrUe(lteInfo->getSourceId()));
+
+    RlcLeg leg = legForDrb(desc.getDrbId(), isNrUeSide);
+
+    auto mac = (leg == RlcLeg::NR_SECONDARY) ? nrMacModule2.get()
+             : (leg == RlcLeg::NR_PRIMARY)   ? nrMacModule.get()
+                                              : macModule.get();
     LogicalCid lcid = mac->drbIdToLcid(desc.getDrbId());
     MacCid cid = MacCid(destId, lcid);
     mac->createOutgoingConnection(cid, desc);
 
-    // RLC entity creation
     DrbKey rlcId = ctrlInfoToTxDrbKey(lteInfo);
-    bool isNr = (registration_->getNodeType()==UE && isNrUe(lteInfo->getSourceId()));
-    auto *rlcMux = isNr ? nrRlcMuxModule.get() : rlcMuxModule.get();
-    createAndInstallRlcTxBuffer(rlcId, lteInfo, rlcMux, isNr);
+    auto *rlcMux = (leg == RlcLeg::NR_SECONDARY) ? nrRlcMuxModule2.get()
+                 : (leg == RlcLeg::NR_PRIMARY)   ? nrRlcMuxModule.get()
+                                                  : rlcMuxModule.get();
+    bool isNrEntity = (leg != RlcLeg::LTE);
+    createAndInstallRlcTxBuffer(rlcId, lteInfo, rlcMux, isNrEntity);
 
-    // PDCP entity creation
-    auto *pdcpMux = check_and_cast<UpperMux *>(nicModule_->getSubmodule("pdcpMux"));
+    auto *pdcpMux = (leg == RlcLeg::NR_SECONDARY)
+        ? check_and_cast<UpperMux *>(nicModule_->getSubmodule("pdcpMux2"))
+        : check_and_cast<UpperMux *>(nicModule_->getSubmodule("pdcpMux"));
     auto *pdcpDcMux = dynamic_cast<DcMux *>(nicModule_->getSubmodule("pdcpDcMux")); // nullptr on UEs (no X2)
 
     if (withPdcp) {
         DrbKey id = DrbKey(lteInfo->getDestId(), lteInfo->getDrbId());
 
-        // DC UE NR leg: check if a master (LTE-leg) PDCP TX entity exists for the same DRB.
-        // If so, wire its nrOut gate to the NR RLC TX entity instead of creating a new PDCP entity.
+        // Native EN-DC master-wiring shortcut (nrOut gate) is skipped
+        // entirely for NR_SECONDARY -- that shortcut only applies to the
+        // LTE-anchor/NR-secondary EN-DC pairing, not a genuine second NR
+        // leg, which always gets its own independent PDCP entity.
         bool wiredToMaster = false;
-        if (registration_->getNodeType()==UE && isNrUe(lteInfo->getSourceId())) {
+        if (leg != RlcLeg::NR_SECONDARY && registration_->getNodeType()==UE && isNrUe(lteInfo->getSourceId())) {
             for (auto& [key, masterEntity] : pdcpTxEntities_) {
                 if (key.getDrbId() == id.getDrbId()) {
                     auto *masterModule = check_and_cast<cModule *>(masterEntity);
@@ -197,7 +249,6 @@ void BearerManagement::createOutgoingConnection(FlowControlInfo *lteInfo, bool w
             }
         }
         if (!wiredToMaster) {
-            // Normal case: create PDCP TX entity
             std::string name = "pdcp-tx-" + std::to_string(num(id.getNodeId())) + "-" + std::to_string(num(id.getDrbId()));
             auto *module = pdcpTxEntityModuleType_->create(name.c_str(), nicModule_);
             module->par("headerCompressedSize") = par("headerCompressedSize");
@@ -205,18 +256,18 @@ void BearerManagement::createOutgoingConnection(FlowControlInfo *lteInfo, bool w
             module->buildInside();
             setEntityDisplayPosition(module, true, rlcMux, num(id.getDrbId()));
 
-            // Wire UpperMux → entity in gate
             int idx = pdcpMux->gateSize("toTxEntity");
             pdcpMux->setGateSize("toTxEntity", idx + 1);
             pdcpMux->gate("toTxEntity", idx)->connectTo(module->gate("in"));
 
-            // Wire PDCP TX out → RLC TX in (direct per-DRB connection)
-            auto rlcIt = (isNrUe(lteInfo->getSourceId()) ? nrRlcTxEntities_ : rlcTxEntities_).find(rlcId);
-            ASSERT(rlcIt != (isNrUe(lteInfo->getSourceId()) ? nrRlcTxEntities_ : rlcTxEntities_).end());
+            auto& txRegistry = (leg == RlcLeg::NR_SECONDARY) ? nrRlcTxEntities2_
+                              : (leg == RlcLeg::NR_PRIMARY)   ? nrRlcTxEntities_
+                                                               : rlcTxEntities_;
+            auto rlcIt = txRegistry.find(rlcId);
+            ASSERT(rlcIt != txRegistry.end());
             module->gate("out")->connectTo(rlcIt->second->gate("in"));
 
-            // Wire dcOut gate → DcMux (if entity has one, e.g. NrTxPdcpEntity; eNB only)
-            if (pdcpDcMux && module->hasGate("dcOut")) {
+            if (leg != RlcLeg::NR_SECONDARY && pdcpDcMux && module->hasGate("dcOut")) {
                 int dcIdx = pdcpDcMux->gateSize("fromEntity");
                 pdcpDcMux->setGateSize("fromEntity", dcIdx + 1);
                 module->gate("dcOut")->connectTo(pdcpDcMux->gate("fromEntity", dcIdx));
@@ -226,12 +277,12 @@ void BearerManagement::createOutgoingConnection(FlowControlInfo *lteInfo, bool w
             module->callInitialize();
             auto *txEnt = check_and_cast<PdcpTxEntityBase *>(module);
             pdcpMux->registerTxEntity(id, txEnt);
-            pdcpTxEntities_[id] = txEnt;
+            (leg == RlcLeg::NR_SECONDARY ? pdcpTxEntities2_ : pdcpTxEntities_)[id] = txEnt;
         }
     }
     else {
-        // DC secondary node: create bypass TX entity (forwards DL from master to RLC)
-        ASSERT(pdcpDcMux != nullptr); // bypass entities are eNB-only
+        // Native DC bypass path -- eNB-only, X2-based, unchanged.
+        ASSERT(pdcpDcMux != nullptr);
         DrbKey id = DrbKey(lteInfo->getDestId(), lteInfo->getDrbId());
         std::string name = "pdcp-bypass-tx-" + std::to_string(num(id.getNodeId())) + "-" + std::to_string(num(id.getDrbId()));
         auto *module = pdcpBypassTxEntityModuleType_->create(name.c_str(), nicModule_);
@@ -239,14 +290,12 @@ void BearerManagement::createOutgoingConnection(FlowControlInfo *lteInfo, bool w
         module->buildInside();
         setEntityDisplayPosition(module, true, rlcMux, num(id.getDrbId()));
 
-        // Wire DcMux → entity in gate (DcMux dispatches incoming DL X2)
         int idx = pdcpDcMux->gateSize("toBypassTxEntity");
         pdcpDcMux->setGateSize("toBypassTxEntity", idx + 1);
         pdcpDcMux->gate("toBypassTxEntity", idx)->connectTo(module->gate("in"));
 
-        // Wire bypass TX out → RLC TX in (direct per-DRB connection)
-        auto rlcIt2 = (isNrUe(lteInfo->getSourceId()) ? nrRlcTxEntities_ : rlcTxEntities_).find(rlcId);
-        ASSERT(rlcIt2 != (isNrUe(lteInfo->getSourceId()) ? nrRlcTxEntities_ : rlcTxEntities_).end());
+        auto rlcIt2 = rlcTxEntities_.find(rlcId);
+        ASSERT(rlcIt2 != rlcTxEntities_.end());
         module->gate("out")->connectTo(rlcIt2->second->gate("in"));
 
         module->scheduleStart(simTime());
@@ -299,14 +348,10 @@ RlcTxEntityBase *BearerManagement::createAndInstallRlcTxBuffer(DrbKey id, FlowCo
     module->buildInside();
     setEntityDisplayPosition(module, false, rlcMux, num(id.getDrbId()));
 
-    // Wire gates: entity → LowerMux (RLC TX 'in' gate is wired from PDCP TX in createOutgoingConnection)
-
-    // Wire entity out gate → LowerMux fromTxEntity
     int fromIdx = rlcMux->gateSize("fromTxEntity");
     rlcMux->setGateSize("fromTxEntity", fromIdx + 1);
     module->gate("out")->connectTo(rlcMux->gate("fromTxEntity", fromIdx));
 
-    // Wire LowerMux macToTxEntity → entity macIn gate
     int macIdx = rlcMux->gateSize("macToTxEntity");
     rlcMux->setGateSize("macToTxEntity", macIdx + 1);
     rlcMux->gate("macToTxEntity", macIdx)->connectTo(module->gate("macIn"));
@@ -317,10 +362,20 @@ RlcTxEntityBase *BearerManagement::createAndInstallRlcTxBuffer(DrbKey id, FlowCo
     RlcTxEntityBase *txEnt = check_and_cast<RlcTxEntityBase *>(module);
     txEnt->setFlowControlInfo(lteInfo);
 
-    // Register in CP entity map
-    (isNr ? nrRlcTxEntities_ : rlcTxEntities_)[id] = txEnt;
+    // nascTime / FRER: registry selection now needs to distinguish
+    // NR_SECONDARY from NR_PRIMARY, not just isNr. Since this helper only
+    // receives a bool, the caller (createOutgoingConnection) picks the
+    // right registry itself after this call returns for TX; this function
+    // still writes to the legacy two registries by rlcMux identity, which
+    // is safe because rlcMux is already leg-specific by the time it's
+    // passed in -- but the registry write below needs the SAME leg
+    // information the caller already resolved. Simplest correct fix:
+    // compare rlcMux against the known secondary mux pointer directly.
+    if (isNr && nrRlcMuxModule2 && rlcMux == nrRlcMuxModule2.get())
+        nrRlcTxEntities2_[id] = txEnt;
+    else
+        (isNr ? nrRlcTxEntities_ : rlcTxEntities_)[id] = txEnt;
 
-    // D2D peer tracking (only for UM TX entities)
     if (rlcType == UM) {
         auto *d2dCtrl = dynamic_cast<D2DModeController *>(nicModule_->getSubmodule("rrc")->getSubmodule("d2dModeController"));
         if (d2dCtrl) {
@@ -349,9 +404,6 @@ RlcRxEntityBase *BearerManagement::createAndInstallRlcRxBuffer(DrbKey id, FlowCo
     module->buildInside();
     setEntityDisplayPosition(module, false, rlcMux, num(id.getDrbId()));
 
-    // Wire gates: LowerMux → entity (RLC RX 'out' gate is wired to PDCP RX in createIncomingConnection)
-
-    // Wire LowerMux → entity in gate
     int idx = rlcMux->gateSize("toRxEntity");
     rlcMux->setGateSize("toRxEntity", idx + 1);
     rlcMux->gate("toRxEntity", idx)->connectTo(module->gate("in"));
@@ -362,9 +414,13 @@ RlcRxEntityBase *BearerManagement::createAndInstallRlcRxBuffer(DrbKey id, FlowCo
     RlcRxEntityBase *rxEnt = check_and_cast<RlcRxEntityBase *>(module);
     rxEnt->setFlowControlInfo(lteInfo);
 
-    // Register in mux routing table and CP entity map
     rlcMux->registerRxBuffer(id, rxEnt);
-    (isNr ? nrRlcRxEntities_ : rlcRxEntities_)[id] = rxEnt;
+
+    // nascTime / FRER: same registry-selection note as createAndInstallRlcTxBuffer.
+    if (isNr && nrRlcMuxModule2 && rlcMux == nrRlcMuxModule2.get())
+        nrRlcRxEntities2_[id] = rxEnt;
+    else
+        (isNr ? nrRlcRxEntities_ : rlcRxEntities_)[id] = rxEnt;
 
     return rxEnt;
 }
@@ -381,72 +437,85 @@ RlcRxEntityBase *BearerManagement::createRlcRxBuffer(DrbKey id, FlowControlInfo 
     return createAndInstallRlcRxBuffer(id, lteInfo, rlcMuxModule.get(), false);
 }
 
-void BearerManagement::deleteLocalPdcpEntities(MacNodeId nodeId)
+void BearerManagement::deleteLocalPdcpEntities(MacNodeId nodeId, RlcLeg leg)
 {
     Enter_Method_Silent("deleteLocalPdcpEntities()");
 
-    auto *pdcpMux = check_and_cast<UpperMux *>(nicModule_->getSubmodule("pdcpMux"));
-    auto *pdcpDcMux = dynamic_cast<DcMux *>(nicModule_->getSubmodule("pdcpDcMux")); // nullptr on UEs (no X2)
-
     bool isEnb = (registration_->getNodeType() == NODEB);
 
-    // Delete PDCP TX entities
-    for (auto it = pdcpTxEntities_.begin(); it != pdcpTxEntities_.end(); ) {
-        if (isEnb ? it->first.getNodeId() == nodeId : true) {
+    // nascTime / FRER FIX: previously "isEnb ? filter-by-nodeId : true" --
+    // the UE branch deleted ALL entities unconditionally, regardless of
+    // nodeId. That's harmless for a UE with exactly one gNB per leg (the
+    // old assumption) but would silently wipe out an unrelated,
+    // still-attached leg's entities the first time ANY leg independently
+    // handed over or detached. Now always filters by nodeId, for both
+    // node types.
+    auto& txMap = (leg == RlcLeg::NR_SECONDARY) ? pdcpTxEntities2_ : pdcpTxEntities_;
+    auto& rxMap = (leg == RlcLeg::NR_SECONDARY) ? pdcpRxEntities2_ : pdcpRxEntities_;
+
+    auto *pdcpMux = check_and_cast<UpperMux *>(
+        nicModule_->getSubmodule(leg == RlcLeg::NR_SECONDARY ? "pdcpMux2" : "pdcpMux"));
+    auto *pdcpDcMux = dynamic_cast<DcMux *>(nicModule_->getSubmodule("pdcpDcMux"));
+
+    for (auto it = txMap.begin(); it != txMap.end(); ) {
+        if (it->first.getNodeId() == nodeId) {
             pdcpMux->unregisterTxEntity(it->first);
             it->second->deleteModule();
-            it = pdcpTxEntities_.erase(it);
+            it = txMap.erase(it);
         } else ++it;
     }
 
-    // Delete PDCP RX entities
-    for (auto it = pdcpRxEntities_.begin(); it != pdcpRxEntities_.end(); ) {
-        if (isEnb ? it->first.getNodeId() == nodeId : true) {
+    for (auto it = rxMap.begin(); it != rxMap.end(); ) {
+        if (it->first.getNodeId() == nodeId) {
             it->second->deleteModule();
-            it = pdcpRxEntities_.erase(it);
+            it = rxMap.erase(it);
         } else ++it;
     }
 
-    // Delete bypass TX entities (eNB-only)
-    ASSERT(pdcpBypassTxEntities_.empty() || pdcpDcMux != nullptr);
-    for (auto it = pdcpBypassTxEntities_.begin(); it != pdcpBypassTxEntities_.end(); ) {
-        if (isEnb ? it->first.getNodeId() == nodeId : true) {
-            pdcpDcMux->unregisterBypassTxEntity(it->first);
-            it->second->deleteModule();
-            it = pdcpBypassTxEntities_.erase(it);
-        } else ++it;
-    }
-
-    // Delete bypass RX entities
-    for (auto it = pdcpBypassRxEntities_.begin(); it != pdcpBypassRxEntities_.end(); ) {
-        if (isEnb ? it->first.getNodeId() == nodeId : true) {
-            it->second->deleteModule();
-            it = pdcpBypassRxEntities_.erase(it);
-        } else ++it;
+    // Bypass entities are native-DC/X2-only, never used by NR_SECONDARY.
+    if (leg != RlcLeg::NR_SECONDARY) {
+        ASSERT(pdcpBypassTxEntities_.empty() || pdcpDcMux != nullptr);
+        for (auto it = pdcpBypassTxEntities_.begin(); it != pdcpBypassTxEntities_.end(); ) {
+            if (it->first.getNodeId() == nodeId) {
+                pdcpDcMux->unregisterBypassTxEntity(it->first);
+                it->second->deleteModule();
+                it = pdcpBypassTxEntities_.erase(it);
+            } else ++it;
+        }
+        for (auto it = pdcpBypassRxEntities_.begin(); it != pdcpBypassRxEntities_.end(); ) {
+            if (it->first.getNodeId() == nodeId) {
+                it->second->deleteModule();
+                it = pdcpBypassRxEntities_.erase(it);
+            } else ++it;
+        }
     }
 }
 
-void BearerManagement::deleteLocalRlcQueues(MacNodeId nodeId, bool nrStack)
+void BearerManagement::deleteLocalRlcQueues(MacNodeId nodeId, RlcLeg leg)
 {
     Enter_Method_Silent("deleteLocalRlcQueues()");
 
     bool isEnb = (registration_->getNodeType() == NODEB);
 
-    // At a NODEB, entities are always stored in the default (LTE) maps regardless of which
-    // leg the caller serves: createIncoming/OutgoingConnection() computes isNr as
-    // (nodeType==UE && ...), which is always false here, and gNB NICs have no nrRlcMux.
-    // Honoring the caller's nrStack flag would make this a silent no-op, leaking the UE's
-    // entities and crashing on re-establishment after a later handover.
-    if (isEnb)
-        nrStack = false;
+    // At a NODEB, entities are always stored in the LTE-named maps
+    // regardless of the caller's leg: createIncoming/OutgoingConnection()
+    // computes isNr as (nodeType==UE && ...), always false at a gNB, and
+    // gnb2 (per the confirmed design) has no second NR leg of its own --
+    // it's an ordinary single-NR-stack gNB from its own perspective.
+    RlcLeg effectiveLeg = isEnb ? RlcLeg::LTE : leg;
 
-    auto &txMap = nrStack ? nrRlcTxEntities_ : rlcTxEntities_;
-    auto &rxMap = nrStack ? nrRlcRxEntities_ : rlcRxEntities_;
-    RlcMux *rlcMux = nrStack ? (nrRlcMuxModule ? nrRlcMuxModule.get() : nullptr) : rlcMuxModule.get();
+    auto& txMap = (effectiveLeg == RlcLeg::NR_SECONDARY) ? nrRlcTxEntities2_
+                : (effectiveLeg == RlcLeg::NR_PRIMARY)   ? nrRlcTxEntities_
+                                                          : rlcTxEntities_;
+    auto& rxMap = (effectiveLeg == RlcLeg::NR_SECONDARY) ? nrRlcRxEntities2_
+                : (effectiveLeg == RlcLeg::NR_PRIMARY)   ? nrRlcRxEntities_
+                                                          : rlcRxEntities_;
+    RlcMux *rlcMux = (effectiveLeg == RlcLeg::NR_SECONDARY) ? (nrRlcMuxModule2 ? nrRlcMuxModule2.get() : nullptr)
+                    : (effectiveLeg == RlcLeg::NR_PRIMARY)   ? (nrRlcMuxModule ? nrRlcMuxModule.get() : nullptr)
+                                                              : rlcMuxModule.get();
     if (!rlcMux)
         return;
 
-    // Delete RLC TX entities
     for (auto it = txMap.begin(); it != txMap.end(); ) {
         if (isEnb ? it->first.getNodeId() == nodeId : true) {
             it->second->deleteModule();
@@ -454,7 +523,6 @@ void BearerManagement::deleteLocalRlcQueues(MacNodeId nodeId, bool nrStack)
         } else ++it;
     }
 
-    // Delete RLC RX entities
     for (auto it = rxMap.begin(); it != rxMap.end(); ) {
         if (isEnb ? it->first.getNodeId() == nodeId : true) {
             rlcMux->unregisterRxBuffer(it->first);
@@ -469,8 +537,11 @@ PdcpRxEntityBase *BearerManagement::lookupPdcpRxEntity(DrbKey id)
     auto it = pdcpRxEntities_.find(id);
     if (it != pdcpRxEntities_.end())
         return it->second;
-    auto it2 = pdcpBypassRxEntities_.find(id);
-    return it2 != pdcpBypassRxEntities_.end() ? it2->second : nullptr;
+    auto it2 = pdcpRxEntities2_.find(id);
+    if (it2 != pdcpRxEntities2_.end())
+        return it2->second;
+    auto it3 = pdcpBypassRxEntities_.find(id);
+    return it3 != pdcpBypassRxEntities_.end() ? it3->second : nullptr;
 }
 
 RlcTxEntityBase *BearerManagement::lookupRlcTxBuffer(DrbKey id)
@@ -479,18 +550,28 @@ RlcTxEntityBase *BearerManagement::lookupRlcTxBuffer(DrbKey id)
     if (it != rlcTxEntities_.end())
         return it->second;
     auto it2 = nrRlcTxEntities_.find(id);
-    return it2 != nrRlcTxEntities_.end() ? it2->second : nullptr;
+    if (it2 != nrRlcTxEntities_.end())
+        return it2->second;
+    auto it3 = nrRlcTxEntities2_.find(id);
+    return it3 != nrRlcTxEntities2_.end() ? it3->second : nullptr;
 }
 
 PdcpTxEntityBase *BearerManagement::lookupPdcpTxEntity(DrbKey id)
 {
     auto it = pdcpTxEntities_.find(id);
-    return it != pdcpTxEntities_.end() ? it->second : nullptr;
+    if (it != pdcpTxEntities_.end())
+        return it->second;
+    auto it2 = pdcpTxEntities2_.find(id);
+    return it2 != pdcpTxEntities2_.end() ? it2->second : nullptr;
 }
 
 void BearerManagement::pdcpActiveUeUL(std::set<MacNodeId> *ueSet)
 {
     for (const auto& [id, rxEntity] : pdcpRxEntities_) {
+        if (!rxEntity->isEmpty())
+            ueSet->insert(id.getNodeId());
+    }
+    for (const auto& [id, rxEntity] : pdcpRxEntities2_) {
         if (!rxEntity->isEmpty())
             ueSet->insert(id.getNodeId());
     }
