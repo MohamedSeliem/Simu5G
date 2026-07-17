@@ -40,6 +40,13 @@ class HandoverController : public cSimpleModule
     MacNodeId nodeId_ = NODEID_NONE;
     bool isNr_ = false;
 
+    // nascTime / FRER: true if this instance manages a DC secondary (SCG)
+    // leg rather than the primary (MCG). See HandoverController.cc for
+    // where this changes behavior (Binder registration calls only --
+    // beaconReceived()/triggerHandover()/deleteOldBuffers() are already
+    // generic and unaffected by this flag).
+    bool isDcSecondary_ = false;
+
     /** The current serving node */
     MacNodeId servingNodeId_ = NODEID_NONE;
 

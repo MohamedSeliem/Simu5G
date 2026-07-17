@@ -22,6 +22,12 @@ simple HandoverController
         @display("i=block/control");
         @class(HandoverController);
 
+        // nascTime / FRER: true if this instance manages a DC secondary (SCG) leg
+        // rather than the primary (MCG). Changes which Binder registration calls
+        // are made in doHandover()/finish() so the secondary leg's attach/detach
+        // never clobbers servingNode_ (the primary's slot).
+        bool isDcSecondary = default(false);
+
         bool dynamicCellAssociation = default(false);
 
         // allows handovers in the UE
