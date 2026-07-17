@@ -53,7 +53,8 @@ void LtePhyUe::initialize(int stage)
         handoverController_->setPhy(this);
 
         // setting isNr_ was originally done in the NrPhyUe subclass, but it is needed here
-        isNr_ = dynamic_cast<NrPhyUe*>(this) && strcmp(getFullName(), "nrPhy") == 0;
+        isNr_ = dynamic_cast<NrPhyUe*>(this)
+                && strcmp(getFullName(), "nrPhy") == 0 || strcmp(getFullName(), "nrPhy2") == 0;
 
         // get local id
         nodeId_ = MacNodeId(hostModule->par(isNr_ ? "nrMacNodeId" : "macNodeId").intValue());
@@ -74,7 +75,8 @@ void LtePhyUe::findCandidateEnb(MacNodeId& outCandidateMasterId, double& outCand
     LteAirFrame *frame = new LteAirFrame("cellSelectionFrame");
     UserControlInfo *cInfo = new UserControlInfo();
     outCandidateMasterId = NODEID_NONE;
-
+    EV_INFO << "DEBUG: findCandidateEnb ENTERED, isNr_=" << isNr_
+            << " enbList.size()=" << binder_->getEnbList().size() << endl;
     // get the list of all eNodeBs in the network
     for (const auto &enbInfo : binder_->getEnbList()) {
         // the NR phy layer only checks signal from gNBs, and
