@@ -59,6 +59,10 @@ class Binder : public cSimpleModule
     std::vector<MacNodeId> servingNode_;  // ueId -> servingEnbId
     std::vector<MacNodeId> secondaryNodeToMasterNodeOrSelf_;
 
+    // nascTime / FRER: per-UE DC secondary tracking (see registerDcSecondary())
+    std::map<MacNodeId, MacNodeId> dcSecondaryNextHop_;   // ueId -> secondary gNB
+    std::map<MacNodeId, MacNodeId> dcPrimaryNextHop_;     // ueId -> primary gNB (cached)
+
     // stores the IP address of the MEC hosts in the simulation
     std::set<inet::L3Address> mecHostAddress_;
 
@@ -311,6 +315,33 @@ class Binder : public cSimpleModule
      * TODO add "forUeId" argument, to getMasterNode() too
      */
     virtual MacNodeId getSecondaryNode(MacNodeId masterEnbId);
+
+    /**
+     * nascTime / FRER: per-UE DC secondary registration. Does NOT touch
+     * servingNode_ (the MCG/primary slot) -- tracks SCG/secondary
+     * attachment separately and non-destructively, so a UE can have both
+     * a primary and a secondary gNB registered simultaneously without
+     * either overwriting the other.
+     */
+    virtual void registerDcSecondary(MacNodeId secondaryEnbId, MacNodeId ueId);
+
+    /**
+     * Removes the DC secondary registration for the given UE, if any.
+     */
+    virtual void unregisterDcSecondary(MacNodeId ueId);
+
+    /**
+     * Returns the UE's currently registered DC secondary gNB, or
+     * NODEID_NONE if it has none.
+     */
+    virtual MacNodeId getDcSecondaryNextHop(MacNodeId ueId) const;
+
+    /**
+     * Returns the UE's primary (MCG) gNB, as cached at the time DC
+     * secondary registration first occurred, falling back to the current
+     * servingNode_ entry if no DC secondary was ever registered.
+     */
+    virtual MacNodeId getDcPrimaryNextHop(MacNodeId ueId);
 
     /**
      * Returns the MacNodeId for the given IP address

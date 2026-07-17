@@ -257,6 +257,39 @@ void Binder::registerMasterNode(MacNodeId masterId, MacNodeId slaveId)
     secondaryNodeToMasterNodeOrSelf_[num(slaveId)] = (masterId != NODEID_NONE) ? masterId : slaveId;  // the "or self" bit
 }
 
+void Binder::registerDcSecondary(MacNodeId secondaryEnbId, MacNodeId ueId)
+{
+    Enter_Method_Silent("registerDcSecondary");
+    ASSERT(getNodeTypeById(secondaryEnbId) == NODEB);
+    ASSERT(getNodeTypeById(ueId) == UE);
+
+    EV << "Binder::registerDcSecondary secondary=" << secondaryEnbId
+       << " ue=" << ueId << endl;
+
+    dcSecondaryNextHop_[ueId] = secondaryEnbId;
+
+    if (dcPrimaryNextHop_.find(ueId) == dcPrimaryNextHop_.end())
+        dcPrimaryNextHop_[ueId] = getServingNode(ueId);
+}
+
+void Binder::unregisterDcSecondary(MacNodeId ueId)
+{
+    Enter_Method_Silent("unregisterDcSecondary");
+    dcSecondaryNextHop_.erase(ueId);
+}
+
+MacNodeId Binder::getDcSecondaryNextHop(MacNodeId ueId) const
+{
+    auto it = dcSecondaryNextHop_.find(ueId);
+    return (it != dcSecondaryNextHop_.end()) ? it->second : NODEID_NONE;
+}
+
+MacNodeId Binder::getDcPrimaryNextHop(MacNodeId ueId)
+{
+    auto it = dcPrimaryNextHop_.find(ueId);
+    return (it != dcPrimaryNextHop_.end()) ? it->second : getServingNodeOrSelf(ueId);
+}
+
 inline ostream& operator<<(ostream& os, const L3Address& addr) { return os << addr.str(); }
 inline ostream& operator<<(ostream& os, const UeInfo& info) { return os << info.str(); }
 inline ostream& operator<<(ostream& os, const EnbInfo& info) { return os << info.str(); }
