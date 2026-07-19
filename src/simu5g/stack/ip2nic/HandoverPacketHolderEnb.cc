@@ -108,14 +108,20 @@ void HandoverPacketHolderEnb::fromIpBs(Packet *pkt)
         return;
     }
 
-    // if UE has moved to another gNB (e.g. late packet after handover), forward via X2
+    // nascTime / FRER: a UE's registered DC secondary must be able to
+    // deliver packets locally, not have them treated as stale/mid-handover
+    // traffic just because it isn't the UE's primary serving node. Without
+    // this, every DL packet destined for a DC-secondary DRB gets diverted
+    // to native X2 forwarding, which was never configured for this topology.
     MacNodeId servingNode = binder_->getServingNodeOrSelf(destId);
-    if (servingNode != NODEID_NONE && servingNode != nodeId_) {
+    bool isDcSecondaryForThisUe = (binder_->getDcSecondaryNextHop(destId) == nodeId_);
+    if (isDcSecondaryForThisUe)
+        EV_INFO << "HandoverPacketHolderEnb::fromIpBs - UE " << destId << " delivered locally as DC secondary (patch 10 active)" << endl;
+    if (servingNode != NODEID_NONE && servingNode != nodeId_ && !isDcSecondaryForThisUe) {
         EV << "Ip2Nic::fromIpBs - UE " << destId << " is served by gNB " << servingNode << ", forwarding via X2" << endl;
         sendTunneledPacketOnHandover(pkt, servingNode);
         return;
     }
-
     toStackBs(pkt);
 }
 

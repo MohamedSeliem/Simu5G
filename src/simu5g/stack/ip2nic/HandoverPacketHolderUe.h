@@ -40,9 +40,15 @@ class HandoverPacketHolderUe : public cSimpleModule
     // NR MAC node id of this node's master (if enabled)
     MacNodeId nrServingNodeId_ = NODEID_NONE;
 
+
+
     bool ueHold_ = false;
     typedef std::list<inet::Packet *> IpDatagramQueue;
     IpDatagramQueue ueHoldFromIp_;
+
+    MacNodeId nrServingNodeId2_ = NODEID_NONE;
+    bool ueHold2_ = false;
+    IpDatagramQueue ueHoldFromIp2_;
 
     cGate *stackGateOut_ = nullptr;
 
@@ -56,8 +62,11 @@ class HandoverPacketHolderUe : public cSimpleModule
 
   public:
     ~HandoverPacketHolderUe() override;
-    void triggerHandoverUe(MacNodeId newMasterId, bool isNr = false);
-    void signalHandoverCompleteUe(bool isNr = false);
+    // nascTime / FRER: isDcSecondary parameter added, default false so
+    // every existing call site (LTE leg, primary NR leg) is source-compatible
+    // and behaviorally unchanged.
+    virtual void triggerHandoverUe(MacNodeId newMasterId, bool isNr, bool isDcSecondary = false);
+    void signalHandoverCompleteUe(bool isNr = false, bool isDcSecondary = false);
 
     MacNodeId getServingNodeId() const { return servingNodeId_; }
     MacNodeId getNrServingNodeId() const { return nrServingNodeId_; }

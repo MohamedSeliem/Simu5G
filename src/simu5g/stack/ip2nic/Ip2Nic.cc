@@ -202,8 +202,12 @@ DrbId Ip2Nic::lookupOrAssignDrbId(const ConnectionKey& key)
 MacNodeId Ip2Nic::getNextHopNodeId(const Ipv4Address& destAddr, bool useNR, MacNodeId sourceId)
 {
     bool isEnb = (nodeType_ == NODEB);
-
     if (isEnb) {
+        EV_INFO << "DEBUG_NEXTHOP destAddr=" << destAddr
+                << " isNR_=" << isNR_
+                << " useNRparam=" << useNR
+                << " dualConnectivityEnabled_=" << dualConnectivityEnabled_
+                << endl;
         // ENB variants
         MacNodeId destId;
         if (isNR_ && (!dualConnectivityEnabled_ || useNR))
@@ -211,39 +215,45 @@ MacNodeId Ip2Nic::getNextHopNodeId(const Ipv4Address& destAddr, bool useNR, MacN
         else
             destId = binder_->getMacNodeId(destAddr);
 
+        EV_INFO << "DEBUG_NEXTHOP_RESULT destAddr=" << destAddr << " resolvedDestId=" << destId << endl;
+
         // master of this UE (myself)
         MacNodeId master = binder_->getServingNodeOrSelf(destId);
-        if (master != nodeId_) {
+
+        // nascTime / FRER: this gNB may legitimately be the UE's registered
+        // DC secondary, not just its primary. Without this check, every gNB
+        // that isn't the UE's primary unconditionally redirects destId to
+        // the master -- correct for a stale/wrong cell, wrong for a
+        // genuine secondary that should deliver locally instead.
+        bool isDcSecondaryForThisUe = (binder_->getDcSecondaryNextHop(destId) == nodeId_);
+
+        if (master != nodeId_ && !isDcSecondaryForThisUe) {
             destId = master;
         }
-        else {
-            // for dual connectivity
+        else if (master == nodeId_) {
+            // for dual connectivity (native EN-DC, unaffected by the above)
             master = binder_->getMasterNodeOrSelf(master);
             if (master != nodeId_) {
                 destId = master;
             }
         }
-        // else UE is directly attached
+        // else: master != nodeId_ but isDcSecondaryForThisUe == true --
+        // keep destId as already resolved above; this gNB is the UE's
+        // legitimate DC secondary, deliver locally rather than redirect.
+
         return destId;
     }
     else {
-        // UE variants
+        // UE variants -- unchanged
         if (!hasD2DSupport_) {
-            // UE is subject to handovers, master may change
             return binder_->getServingNodeOrSelf(nodeId_);
         }
-
-        // D2D-capable UE: check if D2D communication is possible
         MacNodeId destId = binder_->getMacNodeId(destAddr);
         MacNodeId srcId = isNR_ ? (useNR ? nrNodeId_ : nodeId_) : nodeId_;
-
-        // check whether the destination is inside the LTE network and D2D is active
         if (destId == NODEID_NONE ||
             !(binder_->getD2DCapability(srcId, destId) && binder_->getD2DMode(srcId, destId) == DM)) {
-            // packet is destined to the eNB; UE is subject to handovers: master may change
             return binder_->getServingNodeOrSelf(sourceId);
         }
-
         return destId;
     }
 }
