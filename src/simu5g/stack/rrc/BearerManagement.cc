@@ -75,166 +75,80 @@ void BearerManagement::handleMessage(cMessage *msg)
     throw cRuntimeError("This module does not process messages");
 }
 
-RlcLeg BearerManagement::legForDrb(int drbId, bool isNrUeSide) const
+RlcLeg BearerManagement::legForDrb(DrbId drbId, bool isNr, bool isUeSide) const
 {
-    if (isNrUeSide && dcSecondaryDrbIds_.count(drbId) && nrRlcMuxModule2 && nrMacModule2)
+    if (!isNr)
+        return RlcLeg::LTE;
+    if (isUeSide && dcSecondaryDrbIds_.count(num(drbId)) && nrRlcMuxModule2 && nrMacModule2)
         return RlcLeg::NR_SECONDARY;
-    return isNrUeSide ? RlcLeg::NR_PRIMARY : RlcLeg::LTE;
+    return RlcLeg::NR_PRIMARY;
 }
 
-void BearerManagement::createIncomingConnection(FlowControlInfo *lteInfo, bool withPdcp)
-{
-    Enter_Method_Silent("createIncomingConnection()");
-
-    EV << "BearerManagement::createIncomingConnection - " << " srcId=" << lteInfo->getSourceId() << " destId=" << lteInfo->getDestId()
-        << " groupId=" << lteInfo->getMulticastGroupId() << " drbId=" << lteInfo->getDrbId()
-        << " direction=" << dirToA(lteInfo->getDirection())
-        << " withPdcp=" << (withPdcp ? "yes" : "no") << endl;
-
-    ASSERT(lteInfo->getDestId() == registration_->getLteNodeId() || lteInfo->getDestId() == registration_->getNrNodeId() || lteInfo->getMulticastGroupId() != NODEID_NONE);
-
-    FlowDescriptor desc = FlowDescriptor::fromFlowControlInfo(*lteInfo);
-    MacNodeId senderId = desc.getSourceId();
-    bool isNrUeSide = (registration_->getNodeType()==UE && isNrUe(lteInfo->getDestId())); //TODO FIXME! DOES NOT WORK FOR MULTICAST!!!!!
-
-    // nascTime / FRER: three-way leg selection, was binary isNr.
-    RlcLeg leg = legForDrb(desc.getDrbId(), isNrUeSide);
-
-    auto mac = (leg == RlcLeg::NR_SECONDARY) ? nrMacModule2.get()
-             : (leg == RlcLeg::NR_PRIMARY)   ? nrMacModule.get()
-                                              : macModule.get();
-    LogicalCid lcid = mac->drbIdToLcid(desc.getDrbId());
-    MacCid cid = MacCid(senderId, lcid);
-    mac->createIncomingConnection(cid, desc);
-
-    // RLC entity creation
-    DrbKey rlcId = ctrlInfoToRxDrbKey(lteInfo);
-    auto *rlcMux = (leg == RlcLeg::NR_SECONDARY) ? nrRlcMuxModule2.get()
-                 : (leg == RlcLeg::NR_PRIMARY)   ? nrRlcMuxModule.get()
-                                                  : rlcMuxModule.get();
-    // createAndInstallRlcRxBuffer still takes a bool isNr (unchanged) --
-    // it only affects entity naming/param wiring (setRlcEntityParams uses
-    // isNr to pick "^.nrMac"/"^.mac"), which is correct for NR_SECONDARY
-    // too since its entities should reference nrMac2 the same way, not a
-    // third naming scheme.
-    bool isNrEntity = (leg != RlcLeg::LTE);
-    createAndInstallRlcRxBuffer(rlcId, lteInfo, rlcMux, isNrEntity);
-
-    // PDCP entity creation
-    // nascTime / FRER: NR_SECONDARY uses pdcpMux2, a genuinely separate
-    // instance -- unlike RLC, the primary NR leg shares one pdcpMux with
-    // LTE natively, so this split didn't previously exist at the PDCP layer.
-    auto *pdcpMux = (leg == RlcLeg::NR_SECONDARY)
-        ? check_and_cast<UpperMux *>(nicModule_->getSubmodule("pdcpMux2"))
-        : check_and_cast<UpperMux *>(nicModule_->getSubmodule("pdcpMux"));
-    auto *pdcpDcMux = dynamic_cast<DcMux *>(nicModule_->getSubmodule("pdcpDcMux")); // nullptr on UEs (no X2)
-
-    if (withPdcp) {
-        DrbKey id = DrbKey(lteInfo->getSourceId(), lteInfo->getDrbId());
-        std::string name = "pdcp-rx-" + std::to_string(num(id.getNodeId())) + "-" + std::to_string(num(id.getDrbId()));
-        auto *module = pdcpRxEntityModuleType_->create(name.c_str(), nicModule_);
-        module->par("headerCompressedSize") = par("headerCompressedSize");
-        module->finalizeParameters();
-        module->buildInside();
-        setEntityDisplayPosition(module, true, rlcMux, num(id.getDrbId()));
-
-        // nascTime / FRER: select the correct RLC RX registry for the leg.
-        auto& rxRegistry = (leg == RlcLeg::NR_SECONDARY) ? nrRlcRxEntities2_
-                          : (leg == RlcLeg::NR_PRIMARY)   ? nrRlcRxEntities_
-                                                           : rlcRxEntities_;
-        auto rlcIt = rxRegistry.find(rlcId);
-        ASSERT(rlcIt != rxRegistry.end());
-        rlcIt->second->gate("out")->connectTo(module->gate("in"));
-
-        int fromIdx = pdcpMux->gateSize("fromRxEntity");
-        pdcpMux->setGateSize("fromRxEntity", fromIdx + 1);
-        module->gate("out")->connectTo(pdcpMux->gate("fromRxEntity", fromIdx));
-
-        // DcMux/X2 wiring is native-DC-only and never applies to
-        // NR_SECONDARY (which has no pdcpDcMux of its own -- it's a
-        // fully independent DRB, not a split-bearer bypass leg).
-        if (leg != RlcLeg::NR_SECONDARY && pdcpDcMux && module->hasGate("dcIn")) {
-            int dcIdx = pdcpDcMux->gateSize("toRxEntity");
-            pdcpDcMux->setGateSize("toRxEntity", dcIdx + 1);
-            pdcpDcMux->gate("toRxEntity", dcIdx)->connectTo(module->gate("dcIn"));
-        }
-
-        module->scheduleStart(simTime());
-        module->callInitialize();
-        auto *rxEnt = check_and_cast<PdcpRxEntityBase *>(module);
-        (leg == RlcLeg::NR_SECONDARY ? pdcpRxEntities2_ : pdcpRxEntities_)[id] = rxEnt;
-    }
-    else {
-        // Native DC bypass path -- eNB-only, X2-based, unrelated to
-        // NR_SECONDARY. Unchanged from stock behavior.
-        ASSERT(pdcpDcMux != nullptr);
-        DrbKey id = DrbKey(lteInfo->getSourceId(), lteInfo->getDrbId());
-        std::string name = "pdcp-bypass-rx-" + std::to_string(num(id.getNodeId())) + "-" + std::to_string(num(id.getDrbId()));
-        auto *module = pdcpBypassRxEntityModuleType_->create(name.c_str(), nicModule_);
-        module->finalizeParameters();
-        module->buildInside();
-        setEntityDisplayPosition(module, true, rlcMux, num(id.getDrbId()));
-
-        auto rlcIt2 = rlcRxEntities_.find(rlcId);
-        ASSERT(rlcIt2 != rlcRxEntities_.end());
-        rlcIt2->second->gate("out")->connectTo(module->gate("in"));
-
-        int fromIdx = pdcpDcMux->gateSize("fromEntity");
-        pdcpDcMux->setGateSize("fromEntity", fromIdx + 1);
-        module->gate("out")->connectTo(pdcpDcMux->gate("fromEntity", fromIdx));
-
-        module->scheduleStart(simTime());
-        module->callInitialize();
-        auto *rxEnt = check_and_cast<PdcpRxEntityBase *>(module);
-        pdcpBypassRxEntities_[id] = rxEnt;
-    }
-}
-
+// ============================================================================
+// createOutgoingConnection() — corrected.
+// Every line is byte-for-byte pristine EXCEPT where marked "nascTime / FRER".
+// The gNB-side (NODEB) path is now completely untouched, matching pristine
+// exactly -- this is the fix for the null LteMacBase crash: the original
+// rewrite routed gNB-side traffic through a unified leg selector that could
+// resolve to an unconfigured nrMacModule on a plain gNodeB. Now it never can.
+// ============================================================================
 void BearerManagement::createOutgoingConnection(FlowControlInfo *lteInfo, bool withPdcp)
 {
     Enter_Method_Silent("createOutgoingConnection()");
-
     EV << "BearerManagement::createOutgoingConnection - " << " srcId=" << lteInfo->getSourceId() << " destId=" << lteInfo->getDestId()
         << " groupId=" << lteInfo->getMulticastGroupId() << " drbId=" << lteInfo->getDrbId()
         << " direction=" << dirToA(lteInfo->getDirection())
         << " withPdcp=" << (withPdcp ? "yes" : "no") << endl;
-
     ASSERT(lteInfo->getSourceId() == registration_->getLteNodeId() || lteInfo->getSourceId() == registration_->getNrNodeId());
 
     FlowDescriptor desc = FlowDescriptor::fromFlowControlInfo(*lteInfo);
     MacNodeId destId = desc.getDestId();
-    bool isNrUeSide = (registration_->getNodeType()==UE && isNrUe(lteInfo->getSourceId()));
 
-    RlcLeg leg = legForDrb(desc.getDrbId(), isNrUeSide);
+    // nascTime / FRER: is this a UE-side, NR, DC-secondary-routed DRB?
+    // Computed ONCE and used only to select the "2" targets on the UE-side
+    // branch below -- the NODEB (gNB) branch is completely unaffected in
+    // every line below, matching pristine exactly, since a plain gNodeB
+    // never has a second leg of its own (confirmed weeks ago).
+    bool isUeSide = (registration_->getNodeType()==UE);
+    bool isNrDrb = isUeSide && isNrUe(lteInfo->getSourceId());
+    bool isDcSecondaryDrb = isNrDrb && dcSecondaryDrbIds_.count(num(desc.getDrbId())) && nrMacModule2 && nrRlcMuxModule2;
 
-    auto mac = (leg == RlcLeg::NR_SECONDARY) ? nrMacModule2.get()
-             : (leg == RlcLeg::NR_PRIMARY)   ? nrMacModule.get()
-                                              : macModule.get();
+    // Create MAC outgoing connection
+    auto mac = (registration_->getNodeType()==UE && isNrUe(lteInfo->getSourceId()))
+        ? (isDcSecondaryDrb ? nrMacModule2.get() : nrMacModule.get())
+        : macModule.get();
     LogicalCid lcid = mac->drbIdToLcid(desc.getDrbId());
     MacCid cid = MacCid(destId, lcid);
     mac->createOutgoingConnection(cid, desc);
 
+    // RLC entity creation
     DrbKey rlcId = ctrlInfoToTxDrbKey(lteInfo);
-    auto *rlcMux = (leg == RlcLeg::NR_SECONDARY) ? nrRlcMuxModule2.get()
-                 : (leg == RlcLeg::NR_PRIMARY)   ? nrRlcMuxModule.get()
-                                                  : rlcMuxModule.get();
-    bool isNrEntity = (leg != RlcLeg::LTE);
-    createAndInstallRlcTxBuffer(rlcId, lteInfo, rlcMux, isNrEntity);
+    bool isNr = (registration_->getNodeType()==UE && isNrUe(lteInfo->getSourceId()));
+    auto *rlcMux = isNr
+        ? (isDcSecondaryDrb ? nrRlcMuxModule2.get() : nrRlcMuxModule.get())
+        : rlcMuxModule.get();
+    createAndInstallRlcTxBuffer(rlcId, lteInfo, rlcMux, isNr);
 
-    auto *pdcpMux = (leg == RlcLeg::NR_SECONDARY)
+    // PDCP entity creation
+    // nascTime / FRER: pdcpMux selection is the ONE place a genuinely new
+    // pdcpMux2 instance is needed (pristine has no leg distinction here at
+    // all -- confirmed, always plain "pdcpMux" -- because RLC already had
+    // an LTE/NR split natively but PDCP never did until this design added
+    // a second, independent NR leg).
+    auto *pdcpMux = isDcSecondaryDrb
         ? check_and_cast<UpperMux *>(nicModule_->getSubmodule("pdcpMux2"))
         : check_and_cast<UpperMux *>(nicModule_->getSubmodule("pdcpMux"));
     auto *pdcpDcMux = dynamic_cast<DcMux *>(nicModule_->getSubmodule("pdcpDcMux")); // nullptr on UEs (no X2)
 
     if (withPdcp) {
         DrbKey id = DrbKey(lteInfo->getDestId(), lteInfo->getDrbId());
-
-        // Native EN-DC master-wiring shortcut (nrOut gate) is skipped
-        // entirely for NR_SECONDARY -- that shortcut only applies to the
-        // LTE-anchor/NR-secondary EN-DC pairing, not a genuine second NR
-        // leg, which always gets its own independent PDCP entity.
+        // DC UE NR leg: check if a master (LTE-leg) PDCP TX entity exists for the same DRB.
+        // If so, wire its nrOut gate to the NR RLC TX entity instead of creating a new PDCP entity.
+        // nascTime / FRER: this native EN-DC shortcut must never apply to a
+        // DC-SECONDARY DRB -- that's a fully independent DRB (its own PDCP
+        // entity in pdcpTxEntities2_), not a split-bearer forwarded one.
         bool wiredToMaster = false;
-        if (leg != RlcLeg::NR_SECONDARY && registration_->getNodeType()==UE && isNrUe(lteInfo->getSourceId())) {
+        if (!isDcSecondaryDrb && registration_->getNodeType()==UE && isNrUe(lteInfo->getSourceId())) {
             for (auto& [key, masterEntity] : pdcpTxEntities_) {
                 if (key.getDrbId() == id.getDrbId()) {
                     auto *masterModule = check_and_cast<cModule *>(masterEntity);
@@ -249,55 +163,55 @@ void BearerManagement::createOutgoingConnection(FlowControlInfo *lteInfo, bool w
             }
         }
         if (!wiredToMaster) {
+            // Normal case: create PDCP TX entity
             std::string name = "pdcp-tx-" + std::to_string(num(id.getNodeId())) + "-" + std::to_string(num(id.getDrbId()));
             auto *module = pdcpTxEntityModuleType_->create(name.c_str(), nicModule_);
             module->par("headerCompressedSize") = par("headerCompressedSize");
             module->finalizeParameters();
             module->buildInside();
             setEntityDisplayPosition(module, true, rlcMux, num(id.getDrbId()));
-
+            // Wire UpperMux → entity in gate
             int idx = pdcpMux->gateSize("toTxEntity");
             pdcpMux->setGateSize("toTxEntity", idx + 1);
             pdcpMux->gate("toTxEntity", idx)->connectTo(module->gate("in"));
-
-            auto& txRegistry = (leg == RlcLeg::NR_SECONDARY) ? nrRlcTxEntities2_
-                              : (leg == RlcLeg::NR_PRIMARY)   ? nrRlcTxEntities_
-                                                               : rlcTxEntities_;
+            // Wire PDCP TX out → RLC TX in (direct per-DRB connection)
+            // nascTime / FRER: registry selection now three-way, was two-way.
+            auto& txRegistry = isDcSecondaryDrb ? nrRlcTxEntities2_
+                              : (isNrUe(lteInfo->getSourceId()) ? nrRlcTxEntities_ : rlcTxEntities_);
             auto rlcIt = txRegistry.find(rlcId);
             ASSERT(rlcIt != txRegistry.end());
             module->gate("out")->connectTo(rlcIt->second->gate("in"));
-
-            if (leg != RlcLeg::NR_SECONDARY && pdcpDcMux && module->hasGate("dcOut")) {
+            // Wire dcOut gate → DcMux (if entity has one, e.g. NrTxPdcpEntity; eNB only)
+            if (!isDcSecondaryDrb && pdcpDcMux && module->hasGate("dcOut")) {
                 int dcIdx = pdcpDcMux->gateSize("fromEntity");
                 pdcpDcMux->setGateSize("fromEntity", dcIdx + 1);
                 module->gate("dcOut")->connectTo(pdcpDcMux->gate("fromEntity", dcIdx));
             }
-
             module->scheduleStart(simTime());
             module->callInitialize();
             auto *txEnt = check_and_cast<PdcpTxEntityBase *>(module);
             pdcpMux->registerTxEntity(id, txEnt);
-            (leg == RlcLeg::NR_SECONDARY ? pdcpTxEntities2_ : pdcpTxEntities_)[id] = txEnt;
+            (isDcSecondaryDrb ? pdcpTxEntities2_ : pdcpTxEntities_)[id] = txEnt;
         }
     }
     else {
-        // Native DC bypass path -- eNB-only, X2-based, unchanged.
-        ASSERT(pdcpDcMux != nullptr);
+        // DC secondary node: create bypass TX entity (forwards DL from master to RLC)
+        // Native EN-DC/X2 bypass path -- unreachable for nascTime's
+        // DC-secondary DRBs, since patch 7 (Binder::establishUnidirectionalDataConnection)
+        // routes them through withPdcp=true always. Unchanged from pristine.
+        ASSERT(pdcpDcMux != nullptr); // bypass entities are eNB-only
         DrbKey id = DrbKey(lteInfo->getDestId(), lteInfo->getDrbId());
         std::string name = "pdcp-bypass-tx-" + std::to_string(num(id.getNodeId())) + "-" + std::to_string(num(id.getDrbId()));
         auto *module = pdcpBypassTxEntityModuleType_->create(name.c_str(), nicModule_);
         module->finalizeParameters();
         module->buildInside();
         setEntityDisplayPosition(module, true, rlcMux, num(id.getDrbId()));
-
         int idx = pdcpDcMux->gateSize("toBypassTxEntity");
         pdcpDcMux->setGateSize("toBypassTxEntity", idx + 1);
         pdcpDcMux->gate("toBypassTxEntity", idx)->connectTo(module->gate("in"));
-
-        auto rlcIt2 = rlcTxEntities_.find(rlcId);
-        ASSERT(rlcIt2 != rlcTxEntities_.end());
+        auto rlcIt2 = (isNrUe(lteInfo->getSourceId()) ? nrRlcTxEntities_ : rlcTxEntities_).find(rlcId);
+        ASSERT(rlcIt2 != (isNrUe(lteInfo->getSourceId()) ? nrRlcTxEntities_ : rlcTxEntities_).end());
         module->gate("out")->connectTo(rlcIt2->second->gate("in"));
-
         module->scheduleStart(simTime());
         module->callInitialize();
         auto *txEnt = check_and_cast<PdcpTxEntityBase *>(module);
@@ -306,10 +220,112 @@ void BearerManagement::createOutgoingConnection(FlowControlInfo *lteInfo, bool w
     }
 }
 
-void BearerManagement::setRlcEntityParams(cModule *entity, bool isNr)
+// ============================================================================
+// createIncomingConnection() — corrected, same pattern, same discipline.
+// Original isNr line's "//TODO FIXME! DOES NOT WORK FOR MULTICAST!!!!!"
+// comment preserved verbatim -- not our bug to fix, not touching it.
+// ============================================================================
+void BearerManagement::createIncomingConnection(FlowControlInfo *lteInfo, bool withPdcp)
 {
+    Enter_Method_Silent("createIncomingConnection()");
+    EV << "BearerManagement::createIncomingConnection - " << " srcId=" << lteInfo->getSourceId() << " destId=" << lteInfo->getDestId()
+        << " groupId=" << lteInfo->getMulticastGroupId() << " drbId=" << lteInfo->getDrbId()
+        << " direction=" << dirToA(lteInfo->getDirection())
+        << " withPdcp=" << (withPdcp ? "yes" : "no") << endl;
+    ASSERT(lteInfo->getDestId() == registration_->getLteNodeId() || lteInfo->getDestId() == registration_->getNrNodeId() || lteInfo->getMulticastGroupId() != NODEID_NONE);
+
+    FlowDescriptor desc = FlowDescriptor::fromFlowControlInfo(*lteInfo);
+    MacNodeId senderId = desc.getSourceId();
+
+    // nascTime / FRER: same UE-side-only DC-secondary check as outgoing.
+    bool isUeSide = (registration_->getNodeType()==UE);
+    bool isNrDrb = isUeSide && isNrUe(lteInfo->getDestId());
+    bool isDcSecondaryDrb = isNrDrb && dcSecondaryDrbIds_.count(num(desc.getDrbId())) && nrMacModule2 && nrRlcMuxModule2;
+
+    auto mac = (registration_->getNodeType()==UE && isNrUe(lteInfo->getDestId()))
+        ? (isDcSecondaryDrb ? nrMacModule2.get() : nrMacModule.get())
+        : macModule.get(); //TODO FIXME! DOES NOT WORK FOR MULTICAST!!!!!
+    LogicalCid lcid = mac->drbIdToLcid(desc.getDrbId());
+    MacCid cid = MacCid(senderId, lcid);
+    mac->createIncomingConnection(cid, desc);
+
+    // RLC entity creation
+    DrbKey rlcId = ctrlInfoToRxDrbKey(lteInfo);
+    bool isNr = (registration_->getNodeType()==UE && isNrUe(lteInfo->getDestId())); //TODO FIXME! DOES NOT WORK FOR MULTICAST!!!!!
+    auto *rlcMux = isNr
+        ? (isDcSecondaryDrb ? nrRlcMuxModule2.get() : nrRlcMuxModule.get())
+        : rlcMuxModule.get();
+    createAndInstallRlcRxBuffer(rlcId, lteInfo, rlcMux, isNr);
+
+    // PDCP entity creation
+    auto *pdcpMux = isDcSecondaryDrb
+        ? check_and_cast<UpperMux *>(nicModule_->getSubmodule("pdcpMux2"))
+        : check_and_cast<UpperMux *>(nicModule_->getSubmodule("pdcpMux"));
+    auto *pdcpDcMux = dynamic_cast<DcMux *>(nicModule_->getSubmodule("pdcpDcMux")); // nullptr on UEs (no X2)
+
+    if (withPdcp) {
+        DrbKey id = DrbKey(lteInfo->getSourceId(), lteInfo->getDrbId());
+        std::string name = "pdcp-rx-" + std::to_string(num(id.getNodeId())) + "-" + std::to_string(num(id.getDrbId()));
+        auto *module = pdcpRxEntityModuleType_->create(name.c_str(), nicModule_);
+        module->par("headerCompressedSize") = par("headerCompressedSize");
+        module->finalizeParameters();
+        module->buildInside();
+        setEntityDisplayPosition(module, true, rlcMux, num(id.getDrbId()));
+
+        // nascTime / FRER: registry selection now three-way.
+        auto& rxRegistry = isDcSecondaryDrb ? nrRlcRxEntities2_
+                          : (isNrUe(lteInfo->getDestId()) ? nrRlcRxEntities_ : rlcRxEntities_);
+        auto rlcIt = rxRegistry.find(rlcId);
+        ASSERT(rlcIt != rxRegistry.end());
+        rlcIt->second->gate("out")->connectTo(module->gate("in"));
+
+        int fromIdx = pdcpMux->gateSize("fromRxEntity");
+        pdcpMux->setGateSize("fromRxEntity", fromIdx + 1);
+        module->gate("out")->connectTo(pdcpMux->gate("fromRxEntity", fromIdx));
+
+        if (!isDcSecondaryDrb && pdcpDcMux && module->hasGate("dcIn")) {
+            int dcIdx = pdcpDcMux->gateSize("toRxEntity");
+            pdcpDcMux->setGateSize("toRxEntity", dcIdx + 1);
+            pdcpDcMux->gate("toRxEntity", dcIdx)->connectTo(module->gate("dcIn"));
+        }
+        module->scheduleStart(simTime());
+        module->callInitialize();
+        auto *rxEnt = check_and_cast<PdcpRxEntityBase *>(module);
+        (isDcSecondaryDrb ? pdcpRxEntities2_ : pdcpRxEntities_)[id] = rxEnt;
+    }
+    else {
+        // Native EN-DC/X2 bypass path -- unreachable for nascTime's
+        // DC-secondary DRBs (same reasoning as createOutgoingConnection).
+        // Unchanged from pristine.
+        ASSERT(pdcpDcMux != nullptr); // bypass entities are eNB-only
+        DrbKey id = DrbKey(lteInfo->getSourceId(), lteInfo->getDrbId());
+        std::string name = "pdcp-bypass-rx-" + std::to_string(num(id.getNodeId())) + "-" + std::to_string(num(id.getDrbId()));
+        auto *module = pdcpBypassRxEntityModuleType_->create(name.c_str(), nicModule_);
+        module->finalizeParameters();
+        module->buildInside();
+        setEntityDisplayPosition(module, true, rlcMux, num(id.getDrbId()));
+        auto rlcIt2 = (isNrUe(lteInfo->getDestId()) ? nrRlcRxEntities_ : rlcRxEntities_).find(rlcId);
+        ASSERT(rlcIt2 != (isNrUe(lteInfo->getDestId()) ? nrRlcRxEntities_ : rlcRxEntities_).end());
+        rlcIt2->second->gate("out")->connectTo(module->gate("in"));
+        int fromIdx = pdcpDcMux->gateSize("fromEntity");
+        pdcpDcMux->setGateSize("fromEntity", fromIdx + 1);
+        module->gate("out")->connectTo(pdcpDcMux->gate("fromEntity", fromIdx));
+        module->scheduleStart(simTime());
+        module->callInitialize();
+        auto *rxEnt = check_and_cast<PdcpRxEntityBase *>(module);
+        pdcpBypassRxEntities_[id] = rxEnt;
+    }
+}
+
+void BearerManagement::setRlcEntityParams(cModule *entity, bool isNr, bool isDcSecondary)
+{
+    // nascTime / FRER: three-way, was two-way. Without isDcSecondary, every
+    // RLC entity created for the secondary leg had its internal macModule
+    // parameter pointed at "^.nrMac" (the PRIMARY NR MAC) instead of
+    // "^.nrMac2" -- silent, not crashing: the secondary leg's RLC would
+    // request grants from the wrong MAC/scheduler.
     if (entity->hasPar("macModule"))
-        entity->par("macModule").setStringValue(isNr ? "^.nrMac" : "^.mac");
+        entity->par("macModule").setStringValue(!isNr ? "^.mac" : (isDcSecondary ? "^.nrMac2" : "^.nrMac"));
     if (entity->hasPar("isNR"))
         entity->par("isNR").setBoolValue(isNr);
 }
@@ -343,7 +359,11 @@ RlcTxEntityBase *BearerManagement::createAndInstallRlcTxBuffer(DrbKey id, FlowCo
     }
     std::string name = std::string(isNr ? "nrRlc-" : "rlc-") + prefix + "-" + std::to_string(num(id.getNodeId())) + "-" + std::to_string(num(id.getDrbId()));
     auto *module = moduleType->create(name.c_str(), nicModule_);
-    setRlcEntityParams(module, isNr);
+    // nascTime / FRER: same rlcMux-identity check already used below for
+    // registry selection -- single source of truth, not a second parameter
+    // that could drift out of sync with it.
+    bool isDcSecondary = (isNr && nrRlcMuxModule2 && rlcMux == nrRlcMuxModule2.get());
+    setRlcEntityParams(module, isNr, isDcSecondary);
     module->finalizeParameters();
     module->buildInside();
     setEntityDisplayPosition(module, false, rlcMux, num(id.getDrbId()));
@@ -399,7 +419,11 @@ RlcRxEntityBase *BearerManagement::createAndInstallRlcRxBuffer(DrbKey id, FlowCo
     }
     std::string name = std::string(isNr ? "nrRlc-" : "rlc-") + prefix + "-" + std::to_string(num(id.getNodeId())) + "-" + std::to_string(num(id.getDrbId()));
     auto *module = moduleType->create(name.c_str(), nicModule_);
-    setRlcEntityParams(module, isNr);
+    // nascTime / FRER: same rlcMux-identity check already used below for
+    // registry selection -- single source of truth, not a second parameter
+    // that could drift out of sync with it.
+    bool isDcSecondary = (isNr && nrRlcMuxModule2 && rlcMux == nrRlcMuxModule2.get());
+    setRlcEntityParams(module, isNr, isDcSecondary);
     module->finalizeParameters();
     module->buildInside();
     setEntityDisplayPosition(module, false, rlcMux, num(id.getDrbId()));

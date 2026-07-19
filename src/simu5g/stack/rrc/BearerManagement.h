@@ -94,13 +94,13 @@ class BearerManagement : public cSimpleModule
     std::map<DrbKey, RlcTxEntityBase *> nrRlcTxEntities2_;
     std::map<DrbKey, RlcRxEntityBase *> nrRlcRxEntities2_;
 
-    void setRlcEntityParams(cModule *entity, bool isNr);
+    void setRlcEntityParams(cModule *entity, bool isNr, bool isDcSecondary);
     void setEntityDisplayPosition(cModule *entity, bool isPdcpEntity, cModule *rlcMux, int bearerIndex);
     RlcTxEntityBase *createAndInstallRlcTxBuffer(DrbKey id, FlowControlInfo *lteInfo, RlcMux *rlcMux, bool isNr);
     RlcRxEntityBase *createAndInstallRlcRxBuffer(DrbKey id, FlowControlInfo *lteInfo, RlcMux *rlcMux, bool isNr);
 
     // nascTime / FRER: decide which leg a DRB belongs to.
-    RlcLeg legForDrb(int drbId, bool isNrUeSide) const;
+    RlcLeg legForDrb(DrbId drbId, bool isNr, bool isUeSide) const;
 
   protected:
     void initialize(int stage) override;
