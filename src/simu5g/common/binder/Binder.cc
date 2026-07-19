@@ -67,6 +67,7 @@ void Binder::registerCarrierUe(GHz carrierFrequency, unsigned int numerologyInde
     if (it == carrierUeMap_.end())
         throw cRuntimeError("Binder::registerCarrierUe - Carrier [%gGHz] not found (missing registerCarrier call?)", carrierFrequency.get());
 
+    EV_INFO << "DEBUG_CARRIERUE registering ueId=" << ueId << " carrierFreq=" << carrierFrequency << endl;
     carrierUeMap_[carrierFrequency].insert(ueId);
 
     if (ueNumerologyIndex_.find(ueId) == ueNumerologyIndex_.end()) {
@@ -507,12 +508,15 @@ cModule *Binder::getModuleByMacNodeId(MacNodeId nodeId)
 std::vector<MacNodeId> Binder::getDeployedUes(MacNodeId enbNodeId)
 {
     ASSERT(getNodeTypeById(enbNodeId) == NODEB);
-
     std::vector<MacNodeId> connectedUes;
-    for (auto& [nodeId, nodeInfo] : nodeInfoMap_)
-        if (nodeInfo.moduleRef != nullptr && getNodeTypeById(nodeId) == UE && servingNode_.size() > num(nodeId) && servingNode_[num(nodeId)] == enbNodeId)
+    for (auto& [nodeId, nodeInfo] : nodeInfoMap_) {
+        if (nodeInfo.moduleRef == nullptr || getNodeTypeById(nodeId) != UE)
+            continue;
+        bool isPrimary = servingNode_.size() > num(nodeId) && servingNode_[num(nodeId)] == enbNodeId;
+        bool isDcSecondary = getDcSecondaryNextHop(nodeId) == enbNodeId;
+        if (isPrimary || isDcSecondary)
             connectedUes.push_back(nodeId);
-
+    }
     return connectedUes;
 }
 
