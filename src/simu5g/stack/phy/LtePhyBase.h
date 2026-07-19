@@ -302,7 +302,7 @@ class LtePhyBase : public ChannelAccess
     /**
      * Determine radio gate index of the receiving node
      */
-    int getReceiverGateIndex(const cModule *, bool isNr) const;
+    int getReceiverGateIndex(const cModule *, bool isNr, MacNodeId dest = NODEID_NONE) const;
 
   public:
     /*

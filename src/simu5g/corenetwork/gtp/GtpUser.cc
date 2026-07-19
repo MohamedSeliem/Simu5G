@@ -61,6 +61,18 @@ void GtpUser::initialize(int stage)
         }
     }
 
+
+    // DC FRER: optional forced tunnel peer (must be outside the ownerType check
+    // because upf2 IS a UPF and needs this)
+    const char *forcedPeer = par("forceTunnelPeer").stringValue();
+    if (strlen(forcedPeer) > 0) {
+        std::string peerPath = binder_->getNetworkName() + "." + forcedPeer;
+        forcedPeerAddress_ = L3AddressResolver().resolve(peerPath.c_str());
+        hasForcedPeer_ = true;
+        EV_INFO << "GtpUser: forced tunnel peer = " << peerPath
+                << " (" << forcedPeerAddress_ << ")" << endl;
+    }
+
     if (isBaseStation(ownerType_))
         myMacNodeID = MacNodeId(networkNode_->par("macNodeId").intValue());
     else
@@ -157,6 +169,21 @@ void GtpUser::handleFromTrafficFlowFilter(Packet *datagram)
         delete datagram;
         return;
     }
+
+    // DC FRER: bypass normal routing when forced peer is configured
+     if (hasForcedPeer_&& (ownerType_ == UPF || ownerType_ == PGW)) {
+         auto header = makeShared<GtpUserMsg>();
+         header->setTeid(0);
+         header->setQfi(qfi);
+         header->setChunkLength(B(8));
+         auto gtpPacket = new Packet(datagram->getName());
+         gtpPacket->insertAtFront(header);
+         gtpPacket->insertAtBack(datagram->peekData());
+         delete datagram;
+         EV_INFO << "GtpUser: tunneling to forced peer " << forcedPeerAddress_ << endl;
+         socket_.sendTo(gtpPacket, forcedPeerAddress_, tunnelPeerPort_);
+         return;
+     }
 
     // If we are on the eNB and the flowId represents the ID of this eNB, forward the packet locally
     if (flowId == TFT_LOCAL_DELIVERY) {

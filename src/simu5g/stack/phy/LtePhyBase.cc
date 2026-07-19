@@ -186,39 +186,48 @@ void LtePhyBase::sendMulticast(LteAirFrame *frame)
     delete frame->removeControlInfo();
 
     // send the frame to nodes belonging to the multicast group only
-    for (auto [destId, nodeInfo] : binder_->getNodeInfoMap()) {
-        // if the node in the list does not use the same LTE/NR technology of this PHY module, skip it
-        if (isNrUe(destId) != isNr_)
-            continue;
-
-        if (destId != nodeId_ && binder_->isInMulticastGroup(destId, groupId)) {
-            EV << NOW << " LtePhyBase::sendMulticast - node " << destId << " is in the multicast group" << endl;
-
-            // get a pointer to receiving module
-            cModule *receiver = nodeInfo.moduleRef;
-            LtePhyBase *recvPhy;
-            double dist;
-
-            if (enableMulticastD2DRangeCheck_) {
-                // get the correct PHY layer module
-                recvPhy = (isNrUe(destId)) ? check_and_cast<LtePhyBase *>(receiver->getSubmodule("cellularNic")->getSubmodule("nrPhy"))
-                                  : check_and_cast<LtePhyBase *>(receiver->getSubmodule("cellularNic")->getSubmodule("phy"));
-
-                dist = recvPhy->getRadioPosition().distance(getRadioPosition());
-
-                if (dist > multicastD2DRange_) {
-                    EV << NOW << " LtePhyBase::sendMulticast - node too far (" << dist << " > " << multicastD2DRange_ << ". skipping transmission" << endl;
-                    continue;
+        for (auto [destId, nodeInfo] : binder_->getNodeInfoMap()) {
+            // if the node in the list does not use the same LTE/NR technology of this PHY module, skip it
+            if (isNrUe(destId) != isNr_)
+                continue;
+            if (destId != nodeId_ && binder_->isInMulticastGroup(destId, groupId)) {
+                EV << NOW << " LtePhyBase::sendMulticast - node " << destId << " is in the multicast group" << endl;
+                // get a pointer to receiving module
+                cModule *receiver = nodeInfo.moduleRef;
+                LtePhyBase *recvPhy;
+                double dist;
+                if (enableMulticastD2DRangeCheck_) {
+                    // get the correct PHY layer module
+                    recvPhy = (isNrUe(destId)) ? check_and_cast<LtePhyBase *>(receiver->getSubmodule("cellularNic")->getSubmodule("nrPhy"))
+                                      : check_and_cast<LtePhyBase *>(receiver->getSubmodule("cellularNic")->getSubmodule("phy"));
+                    dist = recvPhy->getRadioPosition().distance(getRadioPosition());
+                    if (dist > multicastD2DRange_) {
+                        EV << NOW << " LtePhyBase::sendMulticast - node too far (" << dist << " > " << multicastD2DRange_ << ". skipping transmission" << endl;
+                        continue;
+                    }
                 }
+                EV << NOW << " LtePhyBase::sendMulticast - sending frame to node " << destId << endl;
+                // Create a duplicate frame before sending
+                LteAirFrame *frameToSend = frame->dup();
+
+                // nascTime / FRER: same DC-secondary direct-delivery override as
+                // sendUnicast() -- resolve cellularNic in C++ and target
+                // nrRadioIn2 directly, bypassing NED-interface gate-forwarding
+                // restrictions entirely.
+                bool isNrDest = isNrUe(destId);
+                bool delivered = false;
+                if (isNrDest && binder_->getDcSecondaryNextHop(destId) == nodeId_) {
+                    cModule *nic = receiver->getSubmodule("cellularNic");
+                    int secGate = nic ? nic->findGate("nrRadioIn2") : -1;
+                    if (secGate >= 0) {
+                        sendDirect(frameToSend, 0, frame->getDuration(), nic, secGate);
+                        delivered = true;
+                    }
+                }
+                if (!delivered)
+                    sendDirect(frameToSend, 0, frame->getDuration(), receiver, getReceiverGateIndex(receiver, isNrDest, destId));
             }
-
-            EV << NOW << " LtePhyBase::sendMulticast - sending frame to node " << destId << endl;
-
-            // Create a duplicate frame before sending
-            LteAirFrame *frameToSend = frame->dup();
-            sendDirect(frameToSend, 0, frame->getDuration(), receiver, getReceiverGateIndex(receiver, isNrUe(destId)));
         }
-    }
 
     // delete the original frame
     delete frame;
@@ -243,12 +252,42 @@ void LtePhyBase::sendUnicast(LteAirFrame *frame)
         frame->setAdditionalInfo(*userControlInfo);
         delete userControlInfo;
     }
-
-    sendDirect(frame, 0, frame->getDuration(), receiver, getReceiverGateIndex(receiver, isNrUe(dest)));
+    // nascTime / FRER: if this PHY is dest's registered DC secondary,
+    // deliver directly to cellularNic.nrRadioIn2 by resolving the
+    // submodule in C++ rather than via NED gate forwarding -- avoids
+    // needing nrRadioIn2/dualConnEnabled declared on ICellularNic, since
+    // C++ getSubmodule() isn't restricted to the "like" interface's
+    // declared contract the way NED connections are.
+    bool isNrDest = isNrUe(dest);
+    if (isNrDest && binder_->getDcSecondaryNextHop(dest) == nodeId_) {
+        cModule *nic = receiver->getSubmodule("cellularNic");
+        int secGate = nic ? nic->findGate("nrRadioIn2") : -1;
+        if (secGate >= 0) {
+            sendDirect(frame, 0, frame->getDuration(), nic, secGate);
+            return;
+        }
+    }
+    sendDirect(frame, 0, frame->getDuration(), receiver, getReceiverGateIndex(receiver, isNrDest, dest));
 }
 
-int LtePhyBase::getReceiverGateIndex(const cModule *receiver, bool isNr) const
+int LtePhyBase::getReceiverGateIndex(const cModule *receiver, bool isNr, MacNodeId dest) const
 {
+    // nascTime / FRER: if this PHY (the sender -- nodeId_ here is always
+    // the sender's own ID, since sendUnicast()/sendMulticast() are called
+    // on the transmitting PHY) is registered as dest's DC secondary,
+    // route to the receiver's dedicated secondary NR radio gate instead
+    // of the shared nrRadioIn. Falls through to normal behavior if the
+    // receiver has no such gate (e.g. a non-DC-capable UE), rather than
+    // hard-failing.
+    if (isNr && dest != NODEID_NONE && binder_->getDcSecondaryNextHop(dest) == nodeId_) {
+        int secGate = receiver->findGate("nrRadioIn2");
+        EV_INFO << "DEBUG_GATEROUTE sender_nodeId_=" << nodeId_ << " dest=" << dest
+                << " dcSecondaryNextHop=" << binder_->getDcSecondaryNextHop(dest)
+                << " secGate=" << secGate << " receiver=" << receiver->getFullPath() << endl;
+        if (secGate >= 0)
+            return secGate;
+    }
+
     int gate = (isNr) ? receiver->findGate("nrRadioIn") : receiver->findGate("radioIn");
     if (gate < 0) {
         gate = receiver->findGate("lteRadioIn");

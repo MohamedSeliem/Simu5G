@@ -174,7 +174,8 @@ void LtePhyEnbD2D::handleAirFrame(cMessage *msg)
      *                     TTI x+0.1: UE changes master
      *                     TTI x+1: packet from UE arrives at the old master
      */
-    if (binder_->getServingNodeOrSelf(lteInfo->getSourceId()) != nodeId_) {
+    if (binder_->getServingNodeOrSelf(lteInfo->getSourceId()) != nodeId_
+            && binder_->getDcSecondaryNextHop(lteInfo->getSourceId()) != nodeId_) {
         EV << "WARNING: frame from a UE that is leaving this cell (handover): deleted " << endl;
         EV << "Source MacNodeId: " << lteInfo->getSourceId() << endl;
         EV << "Master MacNodeId: " << nodeId_ << endl;

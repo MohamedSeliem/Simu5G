@@ -33,6 +33,7 @@ simple GtpUser
         int tunnelPeerPort = default(31);
         string gateway = default("");			// optional
 
+        string forceTunnelPeer = default("");  // empty = normal routing, set = force all tunneling to this node
         @display("i=block/tunnel");
 
     gates:

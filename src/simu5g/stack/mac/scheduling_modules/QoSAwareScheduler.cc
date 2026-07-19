@@ -80,8 +80,16 @@ void QoSAwareScheduler::prepareSchedule()
         if (dir != UL && dir != DL) continue;
 
         const UserTxParams& info = eNbScheduler_->mac_->getAmc()->computeTxParams(nodeId, dir, carrierFrequency_);
-        if (info.readCqiVector().empty() || info.readBands().empty()) continue;
-        if (eNbScheduler_->allocatedCws(nodeId) == info.getLayers().size()) continue;
+        if (info.readCqiVector().empty() || info.readBands().empty()) {
+            EV_INFO << "DEBUG_SCHED cid=" << cid << " SKIP: empty cqiVector or bands (cqiSize="
+                    << info.readCqiVector().size() << " bandsSize=" << info.readBands().size() << ")" << endl;
+            continue;
+        }
+        if (eNbScheduler_->allocatedCws(nodeId) == info.getLayers().size()) {
+            EV_INFO << "DEBUG_SCHED cid=" << cid << " SKIP: allocatedCws(" << eNbScheduler_->allocatedCws(nodeId)
+                    << ") == layers(" << info.getLayers().size() << ")" << endl;
+            continue;
+        }
 
         bool cqiNull = std::any_of(info.readCqiVector().begin(), info.readCqiVector().end(), [](int cqi) { return cqi == 0; });
         if (cqiNull) continue;

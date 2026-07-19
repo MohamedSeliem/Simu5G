@@ -53,7 +53,8 @@ void LtePhyUe::initialize(int stage)
         handoverController_->setPhy(this);
 
         // setting isNr_ was originally done in the NrPhyUe subclass, but it is needed here
-        isNr_ = dynamic_cast<NrPhyUe*>(this) && strcmp(getFullName(), "nrPhy") == 0;
+        isNr_ = dynamic_cast<NrPhyUe*>(this)
+                && (strcmp(getFullName(), "nrPhy") == 0 || strcmp(getFullName(), "nrPhy2") == 0);
 
         // get local id
         nodeId_ = MacNodeId(hostModule->par(isNr_ ? "nrMacNodeId" : "macNodeId").intValue());
@@ -74,7 +75,8 @@ void LtePhyUe::findCandidateEnb(MacNodeId& outCandidateMasterId, double& outCand
     LteAirFrame *frame = new LteAirFrame("cellSelectionFrame");
     UserControlInfo *cInfo = new UserControlInfo();
     outCandidateMasterId = NODEID_NONE;
-
+    EV_INFO << "DEBUG: findCandidateEnb ENTERED, isNr_=" << isNr_
+            << " enbList.size()=" << binder_->getEnbList().size() << endl;
     // get the list of all eNodeBs in the network
     for (const auto &enbInfo : binder_->getEnbList()) {
         // the NR phy layer only checks signal from gNBs, and
@@ -140,6 +142,8 @@ void LtePhyUe::changeServingNode(MacNodeId servingNodeId)
     if (servingNodeId_ != NODEID_NONE) {
         LteMacEnb *newMacEnb = check_and_cast<LteMacEnb *>(binder_->getMacByNodeId(servingNodeId_));
         cellInfo_ = newMacEnb->getCellInfo();
+        EV_INFO << "DEBUG_CHANGESERVING nodeId_=" << nodeId_ << " servingNodeId_=" << servingNodeId_
+                << " cellInfo_=" << cellInfo_ << " thisModule=" << getFullPath() << endl;
         cellInfo_->attachUser(nodeId_);
     }
 
@@ -162,6 +166,13 @@ void LtePhyUe::handleAirFrame(cMessage *msg)
     UserControlInfo *lteInfo = new UserControlInfo(frame->getAdditionalInfo());
 
     EV << "LtePhy: received new LteAirFrame with ID " << frame->getId() << " from channel" << endl;
+
+    // nascTime / FRER: debug -- confirm which PHY instance actually receives
+    // this call, unambiguously, rather than inferring from log proximity.
+    EV_INFO << "DEBUG_AIRFRAME module=" << getFullPath()
+            << " sourceId=" << lteInfo->getSourceId()
+            << " destId=" << lteInfo->getDestId()
+            << " frameType=" << phyFrameTypeToA((LtePhyFrameType)lteInfo->getFrameType()) << endl;
 
     if (!binder_->nodeExists(lteInfo->getSourceId())) {
         // source has left the simulation

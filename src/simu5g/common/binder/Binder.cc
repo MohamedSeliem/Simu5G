@@ -67,6 +67,7 @@ void Binder::registerCarrierUe(GHz carrierFrequency, unsigned int numerologyInde
     if (it == carrierUeMap_.end())
         throw cRuntimeError("Binder::registerCarrierUe - Carrier [%gGHz] not found (missing registerCarrier call?)", carrierFrequency.get());
 
+    EV_INFO << "DEBUG_CARRIERUE registering ueId=" << ueId << " carrierFreq=" << carrierFrequency << endl;
     carrierUeMap_[carrierFrequency].insert(ueId);
 
     if (ueNumerologyIndex_.find(ueId) == ueNumerologyIndex_.end()) {
@@ -255,6 +256,39 @@ void Binder::registerMasterNode(MacNodeId masterId, MacNodeId slaveId)
     if (secondaryNodeToMasterNodeOrSelf_.size() <= num(slaveId))
         secondaryNodeToMasterNodeOrSelf_.resize(num(slaveId) + 1);
     secondaryNodeToMasterNodeOrSelf_[num(slaveId)] = (masterId != NODEID_NONE) ? masterId : slaveId;  // the "or self" bit
+}
+
+void Binder::registerDcSecondary(MacNodeId secondaryEnbId, MacNodeId ueId)
+{
+    Enter_Method_Silent("registerDcSecondary");
+    ASSERT(getNodeTypeById(secondaryEnbId) == NODEB);
+    ASSERT(getNodeTypeById(ueId) == UE);
+
+    EV << "Binder::registerDcSecondary secondary=" << secondaryEnbId
+       << " ue=" << ueId << endl;
+
+    dcSecondaryNextHop_[ueId] = secondaryEnbId;
+
+    if (dcPrimaryNextHop_.find(ueId) == dcPrimaryNextHop_.end())
+        dcPrimaryNextHop_[ueId] = getServingNode(ueId);
+}
+
+void Binder::unregisterDcSecondary(MacNodeId ueId)
+{
+    Enter_Method_Silent("unregisterDcSecondary");
+    dcSecondaryNextHop_.erase(ueId);
+}
+
+MacNodeId Binder::getDcSecondaryNextHop(MacNodeId ueId) const
+{
+    auto it = dcSecondaryNextHop_.find(ueId);
+    return (it != dcSecondaryNextHop_.end()) ? it->second : NODEID_NONE;
+}
+
+MacNodeId Binder::getDcPrimaryNextHop(MacNodeId ueId)
+{
+    auto it = dcPrimaryNextHop_.find(ueId);
+    return (it != dcPrimaryNextHop_.end()) ? it->second : getServingNodeOrSelf(ueId);
 }
 
 inline ostream& operator<<(ostream& os, const L3Address& addr) { return os << addr.str(); }
@@ -474,12 +508,15 @@ cModule *Binder::getModuleByMacNodeId(MacNodeId nodeId)
 std::vector<MacNodeId> Binder::getDeployedUes(MacNodeId enbNodeId)
 {
     ASSERT(getNodeTypeById(enbNodeId) == NODEB);
-
     std::vector<MacNodeId> connectedUes;
-    for (auto& [nodeId, nodeInfo] : nodeInfoMap_)
-        if (nodeInfo.moduleRef != nullptr && getNodeTypeById(nodeId) == UE && servingNode_.size() > num(nodeId) && servingNode_[num(nodeId)] == enbNodeId)
+    for (auto& [nodeId, nodeInfo] : nodeInfoMap_) {
+        if (nodeInfo.moduleRef == nullptr || getNodeTypeById(nodeId) != UE)
+            continue;
+        bool isPrimary = servingNode_.size() > num(nodeId) && servingNode_[num(nodeId)] == enbNodeId;
+        bool isDcSecondary = getDcSecondaryNextHop(nodeId) == enbNodeId;
+        if (isPrimary || isDcSecondary)
             connectedUes.push_back(nodeId);
-
+    }
     return connectedUes;
 }
 
@@ -982,7 +1019,21 @@ bool Binder::isDualConnectivityRequired(FlowControlInfo *info)
 
 void Binder::establishUnidirectionalDataConnection(FlowControlInfo *info)
 {
-    bool dualConnected = isDualConnectivityRequired(info);
+    // nascTime / FRER: skip native EN-DC split-bearer entirely for any UE
+    // managed by our own per-DRB secondary-leg routing (see
+    // BearerManagement::dcSecondaryDrbIds_). Without this guard, native
+    // split-bearer fires for EVERY DRB of EVERY dual-tech UE served by a
+    // gNB registered as anyone's Binder-level secondary -- not just the
+    // one DRB nascTime intends to route there. Confirmed via direct trace:
+    // isDualConnectivityRequired() returns true whenever
+    // getMasterNodeOrSelf(nodeB) != nodeB, which registerMasterNode(gnb,
+    // gnb2) makes unconditionally true for gnb2, for all its traffic.
+    MacNodeId ueId = (getNodeTypeById(info->getSourceId()) == UE) ? info->getSourceId()
+                    : (getNodeTypeById(info->getDestId()) == UE) ? info->getDestId()
+                    : NODEID_NONE;
+    bool nascTimeManagedDc = (ueId != NODEID_NONE) && (getDcSecondaryNextHop(ueId) != NODEID_NONE);
+
+    bool dualConnected = !nascTimeManagedDc && isDualConnectivityRequired(info);
     if (!dualConnected) {
         createConnection(info, true);
     }

@@ -39,15 +39,6 @@ using namespace omnetpp;
  */
 class GtpUser : public cSimpleModule
 {
-    inet::UdpSocket socket_;
-    int localPort_;
-
-    // reference to the LTE Binder module
-    inet::ModuleRefByPar<Binder> binder_;
-
-    // the GTP protocol Port
-    unsigned int tunnelPeerPort_;
-
     // IP address of the gateway to the Internet
     inet::L3Address gwAddress_;
 
@@ -64,6 +55,17 @@ class GtpUser : public cSimpleModule
     CoreNodeType selectOwnerType(const char *type);
 
   protected:
+    inet::UdpSocket socket_;
+    int localPort_;
+
+    // reference to the LTE Binder module
+    inet::ModuleRefByPar<Binder> binder_;
+
+    // the GTP protocol Port
+    unsigned int tunnelPeerPort_;
+
+    inet::L3Address forcedPeerAddress_;
+    bool hasForcedPeer_ = false;
 
     int numInitStages() const override { return inet::NUM_INIT_STAGES; }
     void initialize(int stage) override;

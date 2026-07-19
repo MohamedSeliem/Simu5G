@@ -48,6 +48,13 @@ void HandoverController::initialize(int stage)
         otherHandoverController_.reference(this, "otherHandoverControllerModule", false);
 
         isNr_ = par("isNr");
+        // nascTime / FRER: true if this instance manages a DC secondary
+        // (SCG) leg rather than the primary (MCG). Changes which Binder
+        // registration calls are made below and in doHandover()/finish()
+        // so the secondary leg's attach/detach never clobbers
+        // servingNode_ (the primary's slot).
+        isDcSecondary_ = par("isDcSecondary");
+
         cModule *hostModule = inet::getContainingNode(this);
         nodeId_ = MacNodeId(hostModule->par(isNr_ ? "nrMacNodeId" : "macNodeId").intValue());
 
@@ -76,20 +83,40 @@ void HandoverController::initialize(int stage)
         WATCH(handoverAttachmentTime_);
         WATCH(minRssi_);
         WATCH(enableHandover_);
+        WATCH(isDcSecondary_);
 
     }
     else if (stage == INITSTAGE_SIMU5G_PHYSICAL_LAYER) {
-        // get serving cell from configuration
-        servingNodeId_ = binder_->getServingNode(nodeId_);
+        servingNodeId_ = isDcSecondary_ ? binder_->getDcSecondaryNextHop(nodeId_)
+                                         : binder_->getServingNode(nodeId_);
         candidateServingNodeId_ = servingNodeId_;
 
-        // find the best candidate cell
         bool dynamicCellAssociation = par("dynamicCellAssociation").boolValue();
-        if (dynamicCellAssociation) {
+
+        // nascTime / FRER: a DC-secondary instance doesn't do a generic
+        // best-RSSI scan -- it has exactly one correct target (whichever cell
+        // is registered as the primary leg's secondary), and findCandidateEnb()
+        // has no way to search for a specific node, only rank all candidates
+        // by signal strength. If the primary gNB's RSSI is stronger than the
+        // true secondary's anywhere in the topology, the generic scan would
+        // never even propose the correct cell for the reject-filter to accept.
+        if (isDcSecondary_) {
+            MacNodeId primaryServingNode = otherHandoverController_->getServingNodeId();
+            candidateServingNodeId_ = (primaryServingNode != NODEID_NONE)
+                ? binder_->getSecondaryNode(primaryServingNode) : NODEID_NONE;
+            candidateServingNodeRssi_ = 0.0;  // no RSSI comparison for a directly-targeted cell
+
+            if (candidateServingNodeId_ != NODEID_NONE && candidateServingNodeId_ != servingNodeId_) {
+                if (servingNodeId_ != NODEID_NONE)
+                    binder_->unregisterDcSecondary(nodeId_);
+                binder_->registerDcSecondary(candidateServingNodeId_, nodeId_);
+            }
+            servingNodeId_ = candidateServingNodeId_;
+            servingNodeRssi_ = candidateServingNodeRssi_;
+        }
+        else if (dynamicCellAssociation) {
             phy_->findCandidateEnb(candidateServingNodeId_, candidateServingNodeRssi_);
 
-            // binder calls
-            // if dynamicCellAssociation selected a different cell
             if (candidateServingNodeId_ != NODEID_NONE && candidateServingNodeId_ != servingNodeId_) {
                 binder_->unregisterServingNode(servingNodeId_, nodeId_);
                 binder_->registerServingNode(candidateServingNodeId_, nodeId_);
@@ -99,8 +126,21 @@ void HandoverController::initialize(int stage)
         }
 
         EV << "LtePhyUe::initialize - Attaching to eNodeB " << servingNodeId_ << endl;
-
         phy_->changeServingNode(servingNodeId_);
+        // nascTime / FRER: initialize()'s first-attach path bypasses doHandover()
+        // entirely, which is where AMC registration normally happens
+        // (newAmc->attachUser()). Without this, gnb2's LteAmc never learns about
+        // this UE at all -- confirmed via CellInfo::attachUser() being a no-op in
+        // this codebase (rules out the CellInfo-registration theory) and
+        // LteAmc::attachUser() only ever being called from doHandover(), never
+        // from initialize().
+        if (servingNodeId_ != NODEID_NONE) {
+            LteAmc *newAmc = getAmcModule(servingNodeId_);
+            newAmc->attachUser(nodeId_, UL);
+            newAmc->attachUser(nodeId_, DL);
+            if (dynamic_cast<NrPhyUe*>(phy_))
+                newAmc->attachUser(nodeId_, D2D);
+        }
         emit(servingCellSignal_, (long)servingNodeId_);
     }
 }
@@ -122,8 +162,11 @@ void HandoverController::finish()
                 amc->detachUser(nodeId_, DL);
             }
 
-            // binder call
-            binder_->unregisterServingNode(servingNodeId_, nodeId_);
+            // FIX: DC-secondary-safe unregistration.
+            if (isDcSecondary_)
+                binder_->unregisterDcSecondary(nodeId_);
+            else
+                binder_->unregisterServingNode(servingNodeId_, nodeId_);
         }
     }
 }
@@ -170,6 +213,10 @@ void HandoverController::beaconReceived(LteAirFrame *frame, UserControlInfo *lte
     }
 
     // Check if the eNodeB is a DC Secondary node
+    // NOTE: this check is already generic -- driven by the cell-level
+    // registerMasterNode()/getMasterNodeOrSelf() relationship, not by
+    // isDcSecondary_ -- so it correctly applies to a genuine secondary
+    // leg without needing any change here.
     if (dynamic_cast<NrPhyUe*>(phy_)) {
         MacNodeId sourceId = lteInfo->getSourceId();
         MacNodeId masterNodeId = binder_->getMasterNodeOrSelf(sourceId);
@@ -182,6 +229,26 @@ void HandoverController::beaconReceived(LteAirFrame *frame, UserControlInfo *lte
                 delete frame;
                 return;
             }
+        }
+    }
+    // nascTime / FRER: the check above only rejects beacons from cells
+    // that ARE registered as someone's secondary but don't match this
+    // leg's primary. It does NOT reject a beacon from a cell that isn't
+    // registered as anyone's secondary at all -- e.g. gnb's own beacon --
+    // which is exactly how nrHandoverController2 could drift toward
+    // re-attaching to the primary leg's own cell via ordinary RSSI
+    // reassociation, triggering native handover/X2 forwarding that was
+    // never configured for this topology. A DC-secondary instance must
+    // only ever consider cells specifically registered as ITS primary
+    // leg's secondary.
+    if (isDcSecondary_) {
+        MacNodeId primaryServingNode = otherHandoverController_->getServingNodeId();
+        if (primaryServingNode == NODEID_NONE || binder_->getSecondaryNode(primaryServingNode) != lteInfo->getSourceId()) {
+            EV << "DC-secondary instance rejecting beacon from " << lteInfo->getSourceId()
+               << " -- not the registered secondary of primary leg's serving node " << primaryServingNode << endl;
+            delete lteInfo;
+            delete frame;
+            return;
         }
     }
 
@@ -256,6 +323,12 @@ void HandoverController::beaconReceived(LteAirFrame *frame, UserControlInfo *lte
 
 void HandoverController::triggerHandover()
 {
+    // NOTE: everything in this method is already generic -- driven by
+    // dynamic_cast<NrPhyUe*>(phy_) and the cell-level master/secondary
+    // relationship via otherHandoverController_, not by isDcSecondary_.
+    // No changes needed here; a genuine secondary leg's otherPhy_ is
+    // NrPhyUe-typed the same as the primary's, so it correctly takes
+    // the NR-specific branches below.
     if (dynamic_cast<NrPhyUe*>(phy_) == nullptr)
         ASSERT(!isNr_);
 
@@ -413,17 +486,30 @@ void HandoverController::doHandover()
             newAmc->attachUser(nodeId_, D2D);
     }
 
-    // Binder calls
-    if (servingNodeId_ != NODEID_NONE)
-        binder_->unregisterServingNode(servingNodeId_, nodeId_);
+    // FIX: DC-secondary-safe Binder registration. The unpatched version
+    // called registerServingNode()/unregisterServingNode() unconditionally,
+    // which would silently overwrite servingNode_[nodeId_] -- the primary
+    // (MCG) leg's slot -- every time the secondary (SCG) leg attaches or
+    // detaches. That's the exact MCG-clobbers-SCG failure mode flagged
+    // when this design was first scoped.
+    if (servingNodeId_ != NODEID_NONE) {
+        if (isDcSecondary_)
+            binder_->unregisterDcSecondary(nodeId_);
+        else
+            binder_->unregisterServingNode(servingNodeId_, nodeId_);
+    }
 
     if (candidateServingNodeId_ != NODEID_NONE) {
-        binder_->registerServingNode(candidateServingNodeId_, nodeId_);
+        if (isDcSecondary_)
+            binder_->registerDcSecondary(candidateServingNodeId_, nodeId_);
+        else
+            binder_->registerServingNode(candidateServingNodeId_, nodeId_);
     }
     binder_->updateUeInfoCellId(nodeId_, candidateServingNodeId_);
 
     // Move collector (if configured)
     // @author Alessandro Noferi
+    // NOTE: not yet DC-secondary-guarded -- see caveats below.
     if (hasCollector) {
         binder_->moveUeCollector(nodeId_, servingNodeId_, candidateServingNodeId_);
     }
@@ -483,39 +569,39 @@ void HandoverController::forceHandover()
 
 void HandoverController::deleteOldBuffers(MacNodeId servingNodeId)
 {
-    // Delete MAC Buffers
+    // nascTime / FRER: RlcLeg for the UE's own (shared) bearerManagement_ --
+    // this is the one place isDcSecondary_ actually matters, since only the
+    // UE side has a genuine second-leg registry split. A gNB's own
+    // BearerManagement never does (confirmed: gnb2 has no second leg of
+    // its own), so every gNB-side call below just uses isNr_ ? NR_PRIMARY : LTE.
+    RlcLeg ueLeg = !isNr_ ? RlcLeg::LTE
+                 : (isDcSecondary_ ? RlcLeg::NR_SECONDARY : RlcLeg::NR_PRIMARY);
+    RlcLeg gnbLeg = isNr_ ? RlcLeg::NR_PRIMARY : RlcLeg::LTE;
 
-    // delete macBuffer[nodeId_] at old serving node
+    // Delete MAC Buffers
     LteMacEnb *servingNodeMac = check_and_cast<LteMacEnb *>(binder_->getMacByNodeId(servingNodeId));
     servingNodeMac->deleteQueues(nodeId_);
-
-    // delete queues for serving node at this UE
     mac_->deleteQueues(servingNodeId_);
 
     // Delete RLC UM Buffers
-
-    // delete RLC entities for nodeId_ at old serving node
     BearerManagement *servingBm = check_and_cast<BearerManagement *>(binder_->getRrcByNodeId(servingNodeId)->getSubmodule("bearerManagement"));
-    servingBm->deleteLocalRlcQueues(nodeId_, isNr_);
-
-    // delete RLC entities for serving node at this UE
-    bearerManagement_->deleteLocalRlcQueues(nodeId_, isNr_);
+    servingBm->deleteLocalRlcQueues(nodeId_, gnbLeg);
+    bearerManagement_->deleteLocalRlcQueues(nodeId_, ueLeg);
 
     // Delete PDCP Entities
-    // delete pdcpEntities[nodeId_] at old serving node
     // In case of NR dual connectivity, the master can be a secondary node, hence we have to delete PDCP entities residing in the node's master
     MacNodeId pdcpNodeId = binder_->getMasterNodeOrSelf(servingNodeId);
     BearerManagement *masterBm = check_and_cast<BearerManagement *>(binder_->getRrcByNodeId(pdcpNodeId)->getSubmodule("bearerManagement"));
-    masterBm->deleteLocalPdcpEntities(nodeId_);
+    masterBm->deleteLocalPdcpEntities(nodeId_, gnbLeg);
 
     // If the old serving node is a DC secondary, also delete the per-UE bypass PDCP entities
     // residing on the secondary itself (keyed by this UE's id there) -- the master-side call
     // above does not reach them
     if (pdcpNodeId != servingNodeId)
-        servingBm->deleteLocalPdcpEntities(nodeId_);
+        servingBm->deleteLocalPdcpEntities(nodeId_, gnbLeg);
 
     // delete PDCP entities for serving node at this UE
-    bearerManagement_->deleteLocalPdcpEntities(servingNodeId_);
+    bearerManagement_->deleteLocalPdcpEntities(servingNodeId_, ueLeg);
 }
 
 LteAmc *HandoverController::getAmcModule(MacNodeId nodeId)

@@ -21,4 +21,5 @@ moduleinterface IHandoverPacketHolder
         input upperLayerIn;
         input x2In @loose; // only used in eNodeB/gNodeB nodes
         output stackOut;
+        output hoManagerOut @loose; // to forward packets to handover manager for X2 tunneling
 }
