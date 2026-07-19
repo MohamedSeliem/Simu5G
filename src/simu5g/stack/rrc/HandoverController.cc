@@ -87,40 +87,60 @@ void HandoverController::initialize(int stage)
 
     }
     else if (stage == INITSTAGE_SIMU5G_PHYSICAL_LAYER) {
-        // FIX: for a DC secondary instance, the initial serving cell comes
-        // from the per-UE DC-secondary registration, not from the shared
-        // servingNode_ slot (which belongs to the primary/MCG leg).
         servingNodeId_ = isDcSecondary_ ? binder_->getDcSecondaryNextHop(nodeId_)
                                          : binder_->getServingNode(nodeId_);
         candidateServingNodeId_ = servingNodeId_;
 
-        // find the best candidate cell
         bool dynamicCellAssociation = par("dynamicCellAssociation").boolValue();
-        if (dynamicCellAssociation) {
+
+        // nascTime / FRER: a DC-secondary instance doesn't do a generic
+        // best-RSSI scan -- it has exactly one correct target (whichever cell
+        // is registered as the primary leg's secondary), and findCandidateEnb()
+        // has no way to search for a specific node, only rank all candidates
+        // by signal strength. If the primary gNB's RSSI is stronger than the
+        // true secondary's anywhere in the topology, the generic scan would
+        // never even propose the correct cell for the reject-filter to accept.
+        if (isDcSecondary_) {
+            MacNodeId primaryServingNode = otherHandoverController_->getServingNodeId();
+            candidateServingNodeId_ = (primaryServingNode != NODEID_NONE)
+                ? binder_->getSecondaryNode(primaryServingNode) : NODEID_NONE;
+            candidateServingNodeRssi_ = 0.0;  // no RSSI comparison for a directly-targeted cell
+
+            if (candidateServingNodeId_ != NODEID_NONE && candidateServingNodeId_ != servingNodeId_) {
+                if (servingNodeId_ != NODEID_NONE)
+                    binder_->unregisterDcSecondary(nodeId_);
+                binder_->registerDcSecondary(candidateServingNodeId_, nodeId_);
+            }
+            servingNodeId_ = candidateServingNodeId_;
+            servingNodeRssi_ = candidateServingNodeRssi_;
+        }
+        else if (dynamicCellAssociation) {
             phy_->findCandidateEnb(candidateServingNodeId_, candidateServingNodeRssi_);
 
-            // binder calls
-            // if dynamicCellAssociation selected a different cell
             if (candidateServingNodeId_ != NODEID_NONE && candidateServingNodeId_ != servingNodeId_) {
-                // FIX: route through the DC-secondary-safe registration
-                // path when this instance is the secondary leg.
-                if (isDcSecondary_) {
-                    if (servingNodeId_ != NODEID_NONE)
-                        binder_->unregisterDcSecondary(nodeId_);
-                    binder_->registerDcSecondary(candidateServingNodeId_, nodeId_);
-                }
-                else {
-                    binder_->unregisterServingNode(servingNodeId_, nodeId_);
-                    binder_->registerServingNode(candidateServingNodeId_, nodeId_);
-                }
+                binder_->unregisterServingNode(servingNodeId_, nodeId_);
+                binder_->registerServingNode(candidateServingNodeId_, nodeId_);
             }
             servingNodeId_ = candidateServingNodeId_;
             servingNodeRssi_ = candidateServingNodeRssi_;
         }
 
         EV << "LtePhyUe::initialize - Attaching to eNodeB " << servingNodeId_ << endl;
-
         phy_->changeServingNode(servingNodeId_);
+        // nascTime / FRER: initialize()'s first-attach path bypasses doHandover()
+        // entirely, which is where AMC registration normally happens
+        // (newAmc->attachUser()). Without this, gnb2's LteAmc never learns about
+        // this UE at all -- confirmed via CellInfo::attachUser() being a no-op in
+        // this codebase (rules out the CellInfo-registration theory) and
+        // LteAmc::attachUser() only ever being called from doHandover(), never
+        // from initialize().
+        if (servingNodeId_ != NODEID_NONE) {
+            LteAmc *newAmc = getAmcModule(servingNodeId_);
+            newAmc->attachUser(nodeId_, UL);
+            newAmc->attachUser(nodeId_, DL);
+            if (dynamic_cast<NrPhyUe*>(phy_))
+                newAmc->attachUser(nodeId_, D2D);
+        }
         emit(servingCellSignal_, (long)servingNodeId_);
     }
 }
@@ -209,6 +229,26 @@ void HandoverController::beaconReceived(LteAirFrame *frame, UserControlInfo *lte
                 delete frame;
                 return;
             }
+        }
+    }
+    // nascTime / FRER: the check above only rejects beacons from cells
+    // that ARE registered as someone's secondary but don't match this
+    // leg's primary. It does NOT reject a beacon from a cell that isn't
+    // registered as anyone's secondary at all -- e.g. gnb's own beacon --
+    // which is exactly how nrHandoverController2 could drift toward
+    // re-attaching to the primary leg's own cell via ordinary RSSI
+    // reassociation, triggering native handover/X2 forwarding that was
+    // never configured for this topology. A DC-secondary instance must
+    // only ever consider cells specifically registered as ITS primary
+    // leg's secondary.
+    if (isDcSecondary_) {
+        MacNodeId primaryServingNode = otherHandoverController_->getServingNodeId();
+        if (primaryServingNode == NODEID_NONE || binder_->getSecondaryNode(primaryServingNode) != lteInfo->getSourceId()) {
+            EV << "DC-secondary instance rejecting beacon from " << lteInfo->getSourceId()
+               << " -- not the registered secondary of primary leg's serving node " << primaryServingNode << endl;
+            delete lteInfo;
+            delete frame;
+            return;
         }
     }
 
