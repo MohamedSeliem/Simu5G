@@ -59,14 +59,19 @@ AmcPilot *LteAmc::getAmcPilot(const cPar& p)
 MacNodeId LteAmc::getServingNodeOrSelf(MacNodeId dst)
 {
     MacNodeId nh = binder_->getServingNodeOrSelf(dst);
-
     if (nh == nodeId_) {
         // I'm the master for this slave (it is directly connected)
         return dst;
     }
-
+    // nascTime / FRER: I might not be dst's primary, but I could still be
+    // its registered DC secondary -- in which case I should keep operating
+    // on dst directly, not redirect to the primary (which isn't a valid
+    // UE id from my own per-UE lookup tables, causing map::at to throw
+    // in every caller downstream: computeTxParams, getFeedback, etc.)
+    if (binder_->getDcSecondaryNextHop(dst) == nodeId_) {
+        return dst;
+    }
     EV << "LteAmc::getServingNodeOrSelf Node Id dst : " << dst << endl;
-
     return nh;
 }
 
