@@ -1,7 +1,7 @@
 //
 //                  Simu5G
 //
-// Authors: Andras Varga (OpenSim Ltd)
+// Authors: Andras Varga (OpenSim Ltd), Mohamed Seliem (University College Cork)
 //
 // This file is part of a software released under the license included in file
 // "license.pdf". Please read LICENSE and README files before using it.

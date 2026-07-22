@@ -107,6 +107,8 @@ void NrSdap::handleMessage(cMessage *msg)
 
 void NrSdap::handleUpperPacket(inet::Packet *pkt)
 {
+    EV_INFO << "DEBUG_SDAP_IDENTITY fullPath=" << getFullPath()
+                << " isUe=" << isUe << endl;
     Qfi qfi = QFI_NONE;
     bool qfiFromReflectiveQos = false;
 

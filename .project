@@ -3,7 +3,8 @@
 	<name>simu5G</name>
 	<comment></comment>
 	<projects>
-		<project>inet-4.5.4</project>
+		<project>inet-4.6.0</project>
+		<project>nascTime</project>
 	</projects>
 	<buildSpec>
 		<buildCommand>

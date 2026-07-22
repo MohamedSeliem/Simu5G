@@ -38,6 +38,13 @@ void NrPhyUe::handleAirFrame(cMessage *msg)
 
     EV << "NrPhyUe: received new LteAirFrame with ID " << frame->getId() << " from channel" << endl;
 
+    // nascTime / FRER: debug -- confirm which PHY instance actually receives
+    // this call, unambiguously, rather than inferring from log proximity.
+    EV_INFO << "DEBUG_AIRFRAME module=" << getFullPath()
+            << " sourceId=" << lteInfo->getSourceId()
+            << " destId=" << lteInfo->getDestId()
+            << " frameType=" << phyFrameTypeToA((LtePhyFrameType)lteInfo->getFrameType()) << endl;
+
     MacNodeId sourceId = lteInfo->getSourceId();
     if (!binder_->nodeExists(sourceId)) {
         // The source has left the simulation

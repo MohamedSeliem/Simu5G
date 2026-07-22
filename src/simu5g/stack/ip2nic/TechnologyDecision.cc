@@ -82,6 +82,16 @@ void TechnologyDecision::handleMessage(cMessage *msg)
         bool ueLteStack = (binder_->getServingNodeOrSelf(ueId) != NODEID_NONE);
         bool ueNrStack = (binder_->getServingNodeOrSelf(nrUeId) != NODEID_NONE);
 
+        // nascTime / FRER: debug -- confirm exactly what this branch
+        // resolves for a DL flow before useNr gets decided.
+        EV_INFO << "DEBUG_NODEB destAddr=" << destAddr
+                << " resolvedUeId=" << ueId
+                << " resolvedNrUeId=" << nrUeId
+                << " ueLteStack=" << ueLteStack
+                << " ueNrStack=" << ueNrStack
+                << " dualConnectivityEnabled_=" << dualConnectivityEnabled_
+                << endl;
+
         if (!ueLteStack && !ueNrStack) {
             EV << "TechnologyDecision: UE is not attached to any serving node. Delete packet." << endl;
             delete pkt;
@@ -108,11 +118,16 @@ void TechnologyDecision::handleMessage(cMessage *msg)
         //    after: ueLteStack=true, ueNrStack=true, servingNodeId=1, nrServingNodeId=2, typeOfService=10 --> useNr = true
         //    before: ueLteStack=true, ueNrStack=true,servingNodeId=1, nrServingNodeId=0, typeOfService=10 --> useNr = false
         //
+
         auto handoverPacketHolder = check_and_cast<HandoverPacketHolderUe*>(getParentModule()->getSubmodule("handoverPacketHolder"));
         MacNodeId servingNodeId = handoverPacketHolder->getServingNodeId();
         MacNodeId nrServingNodeId = handoverPacketHolder->getNrServingNodeId();
         bool hasLteServing = (servingNodeId != NODEID_NONE);
         bool hasNrServing = (nrServingNodeId != NODEID_NONE);
+
+        EV_INFO << "DEBUG: TechnologyDecision UE nodeId=" << nodeId_
+                << " servingNodeId=" << servingNodeId << " nrServingNodeId=" << nrServingNodeId
+                << " hasLteServing=" << hasLteServing << " hasNrServing=" << hasNrServing << endl;
 
         if (!hasLteServing && !hasNrServing) {
             EV << "TechnologyDecision: UE is not attached to any serving node. Delete packet." << endl;
