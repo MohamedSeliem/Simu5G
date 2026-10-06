@@ -1,7 +1,8 @@
 //
 //                  Simu5G
 //
-// Authors: Mohamed Seliem (University College Cork), Andras Varga (OpenSim Ltd)
+// Authors: Mohamed Seliem (University College Cork), Andras Varga (OpenSim Ltd),
+//          Afshin Zanganeh and How-Hang Liu (Technical University of Dresden)
 //
 // This file is part of a software released under the license included in file
 // "license.pdf". Please read LICENSE and README files before using it.
@@ -53,16 +54,18 @@ void NrSdap::initialize()
 bool NrSdap::requiresSdapHeader(const DrbConfig *drb)
 {
     // SDAP header is needed when the QFI cannot be unambiguously determined
-    // from the DRB alone on the RX side:
+    // from the DRB alone on the RX side, or to carry RQI for reflective QoS:
     // - default DRB: may carry packets with unmapped QFIs (fallback traffic)
     // - multiple QFIs mapped: reverse mapping is ambiguous
+    // - reflective QoS: dedicated DRBs still need a header for RQI
     // Caller must ensure drb is not null.
-    return drb->isDefault || drb->qfiList.size() > 1;
+    // Reflective QoS needs the RQI bit even when one QFI maps to one DRB.
+    return drb->isDefault || drb->qfiList.size() > 1 || par("useReflectiveQos").boolValue();
 }
 
 bool NrSdap::shouldEnableReflectiveQos(Qfi qfi)
 {
-    return par("useReflectiveQos").boolValue(); // for now -- should come from RRC config
+    return !isUe && par("useReflectiveQos").boolValue(); // for now -- should come from RRC config
 }
 
 const inet::Protocol *NrSdap::getUpperProtocol(const DrbConfig *ctx)
@@ -184,6 +187,10 @@ void NrSdap::handleUpperPacket(inet::Packet *pkt)
     auto lteInfo = pkt->getTagForUpdate<FlowControlInfo>();
     lteInfo->setDrbId(drb->drbId);
     lteInfo->setRlcType(drb->rlcType);
+    // The UE MAC groups uplink logical channels by this field. SDAP owns the
+    // QFI-to-DRB decision, so it must also carry the configured DRB priority
+    // down to the logical-channel scheduler.
+    lteInfo->setTraffic(drb->trafficClass);
 
     // Establish the connection unless its PDCP TX entity already exists. The entity
     // registry is authoritative: entities deleted at handover or D2D mode switch get

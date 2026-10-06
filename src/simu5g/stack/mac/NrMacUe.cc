@@ -3,6 +3,7 @@
 //
 // Copyright (C) 2019-2021 Giovanni Nardini, Giovanni Stea, Antonio Virdis et al. (University of Pisa)
 // Copyright (C) 2022-2026 Giovanni Nardini, Giovanni Stea et al. (University of Pisa)
+// Uplink QoS contributors: Afshin Zanganeh and How-Hang Liu (Technical University of Dresden)
 //
 // This file is part of a software released under the license included in file
 // "license.pdf". Please read LICENSE and README files before using it.
@@ -446,16 +447,35 @@ void NrMacUe::macPduMake(MacCid cid)
                     sduPerCid--;
                 }
 
-                // consider virtual buffers to compute BSR size
-                size += connDescOut_[destCid].buffer->getQueueOccupancy();
+            }
+        }
 
-                if (size > 0) {
-                    // take into account the RLC header size
-                    if (connDescOut_[destCid].flowInfo.getRlcType() == UM)
-                        size += RLC_HEADER_UM;
-                    else if (connDescOut_[destCid].flowInfo.getRlcType() == AM)
-                        size += RLC_HEADER_AM;
-                }
+        // A BSR describes the UE's residual uplink backlog, not merely the
+        // connections selected in this grant. Computing it in the schedule
+        // loop above made an unscheduled lower-priority DRB invisible to the
+        // gNB forever: the gNB kept granting only enough bytes for the DRB
+        // already served by the UE's logical-channel scheduler.
+        //
+        // LcgScheduler has already removed the scheduled bytes from these
+        // virtual buffers, so summing every UL connection here reports the
+        // correct post-grant backlog while retaining UE-side prioritization.
+        if (bsrTriggered_) {
+            for (const auto& [bufferCid, connection] : connDescOut_) {
+                if (connection.flowInfo.getDirection() != UL)
+                    continue;
+
+                int64_t connectionSize = connection.buffer->getQueueOccupancy();
+                if (connectionSize == 0)
+                    continue;
+
+                if (connection.flowInfo.getRlcType() == UM)
+                    connectionSize += RLC_HEADER_UM;
+                else if (connection.flowInfo.getRlcType() == AM)
+                    connectionSize += RLC_HEADER_AM;
+
+                size += connectionSize;
+                EV << "NrMacUe::macPduMake - residual UL backlog cid="
+                   << bufferCid << " size=" << connectionSize << endl;
             }
         }
     }

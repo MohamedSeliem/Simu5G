@@ -1,7 +1,8 @@
 //
 //                  Simu5G
 //
-// Authors: Mohamed Seliem (University College Cork)
+// Authors: Mohamed Seliem (University College Cork), Afshin Zanganeh and How-Hang Liu
+//          (Technical University of Dresden)
 //
 // This file is part of a software released under the license included in file
 // "license.pdf". Please read LICENSE and README files before using it.
@@ -24,6 +25,7 @@ struct DrbConfig {
     bool isDefault = false;           // true if this is the default DRB for this UE
     std::vector<Qfi> qfiList;       // QFIs mapped to this DRB
     LteRlcType rlcType = UM;        // RLC mode for this DRB (AM, UM, TM)
+    LteTrafficClass trafficClass = BACKGROUND; // UE LCG/LCP priority class
     PduSessionType pduSessionType = IP_V4;  // PDU session type (3GPP TS 23.501)
     std::string upperProtocol;  // INET protocol name for upper layer dispatch (empty = derive from pduSessionType)
 };
@@ -36,7 +38,9 @@ inline std::ostream& operator<<(std::ostream& os, const DrbConfig& ctx) {
         if (i) os << ",";
         os << ctx.qfiList[i];
     }
-    os << "] rlc=" << rlcTypeToA(ctx.rlcType) << " pduSession=" << pduSessionTypeToA(ctx.pduSessionType);
+    os << "] rlc=" << rlcTypeToA(ctx.rlcType)
+       << " trafficClass=" << lteTrafficClassToA(ctx.trafficClass)
+       << " pduSession=" << pduSessionTypeToA(ctx.pduSessionType);
     if (!ctx.upperProtocol.empty())
         os << " upperProto=" << ctx.upperProtocol;
     return os;

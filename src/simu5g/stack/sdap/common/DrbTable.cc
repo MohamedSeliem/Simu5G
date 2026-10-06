@@ -1,7 +1,8 @@
 //
 //                  Simu5G
 //
-// Authors: Mohamed Seliem (University College Cork)
+// Authors: Mohamed Seliem (University College Cork), Afshin Zanganeh and How-Hang Liu
+//          (Technical University of Dresden)
 //
 // This file is part of a software released under the license included in file
 // "license.pdf". Please read LICENSE and README files before using it.
@@ -44,6 +45,11 @@ void DrbTable::loadFromJson(const cValueArray *arr)
         // rlcType (optional, default UM)
         if (entry->containsKey("rlcType"))
             ctx.rlcType = aToRlcType(entry->get("rlcType").stdstringValue());
+
+        // trafficClass controls UE-side logical-channel prioritization for
+        // uplink grants. Lower enum values are served first by LcgScheduler.
+        if (entry->containsKey("trafficClass"))
+            ctx.trafficClass = aToLteTrafficClass(entry->get("trafficClass").stdstringValue());
 
         // pduSessionType (optional, default IPv4)
         if (entry->containsKey("pduSessionType"))
@@ -116,4 +122,3 @@ void DrbTable::dump(std::ostream& os) const
 }
 
 } // namespace simu5g
-

@@ -1,7 +1,7 @@
 //
 //                  Simu5G
 //
-// Authors: Andras Varga (OpenSim Ltd)
+// Authors: Andras Varga (OpenSim Ltd), Afshin Zanganeh and How-Hang Liu (Technical University of Dresden)
 //
 // This file is part of a software released under the license included in file
 // "license.pdf". Please read LICENSE and README files before using it.
@@ -77,6 +77,7 @@ void ReflectiveQosTable::handleDownlinkFlow(inet::Packet *pkt, Qfi qfi)
     auto it = reflectiveFlows_.find(uplinkFlowKey);
     if (it != reflectiveFlows_.end()) {
         // Update existing flow
+        it->second.qfi = qfi;
         it->second.lastSeen = simTime();
         it->second.isActive = true;
         EV_INFO << "ReflectiveQosTable: Updated reflective QoS flow: " << uplinkFlowKey.toString()
