@@ -3,6 +3,7 @@
 //
 // Copyright (C) 2012-2021 Giovanni Nardini, Giovanni Stea, Antonio Virdis et al. (University of Pisa)
 // Copyright (C) 2022-2026 Giovanni Nardini, Giovanni Stea et al. (University of Pisa)
+// Contributors: Afshin Zanganeh and How-Hang Liu (Technical University of Dresden)
 //
 // This file is part of a software released under the license included in file
 // "license.pdf". Please read LICENSE and README files before using it.
@@ -221,6 +222,13 @@ class LteMacEnb : public LteMacBase
     {
         return amc_;
     }
+
+    /**
+     * nascTime / uplink FRER: schedule the initial RAC-sized grant for a UE's
+     * dedicated DC-secondary MAC. After that first grant carries a BSR, the
+     * normal uplink scheduler loop takes over.
+     */
+    virtual void primeDcUplinkAccess(MacNodeId ueId);
 
     /**
      * Getter for cellInfo.

@@ -263,6 +263,10 @@ void Ip2Nic::analyzePacket(inet::Packet *pkt, Ipv4Address srcAddr, Ipv4Address d
     // --- Common preamble ---
     auto lteInfo = pkt->addTagIfAbsent<FlowControlInfo>();
 
+    // Preserve the IPv4 ToS byte for UE uplink routing and SDAP classification.
+    // The FRER replica uses DSCP 8 to select the secondary NR leg and DRB 4.
+    lteInfo->setTypeOfService(typeOfService);
+
     // Traffic category, RLC type (skipped when SDAP handles DRB/RLC assignment)
     if (!hasSdap_) {
         LteTrafficClass trafficCategory = getTrafficCategory(pkt);

@@ -3,6 +3,7 @@
 //
 // Copyright (C) 2012-2021 Giovanni Nardini, Giovanni Stea, Antonio Virdis et al. (University of Pisa)
 // Copyright (C) 2022-2026 Giovanni Nardini, Giovanni Stea et al. (University of Pisa)
+// Contributors: Afshin Zanganeh and How-Hang Liu (Technical University of Dresden)
 //
 // This file is part of a software released under the license included in file
 // "license.pdf". Please read LICENSE and README files before using it.
@@ -93,6 +94,16 @@ SchedDiscipline LteMacEnb::getSchedDiscipline(Direction dir)
     else {
         throw cRuntimeError("LteMacEnb::getSchedDiscipline(): unrecognized direction %d", (int)dir);
     }
+}
+
+void LteMacEnb::primeDcUplinkAccess(MacNodeId ueId)
+{
+    Enter_Method("primeDcUplinkAccess");
+    const CarrierInfoMap& carriers = cellInfo_->getCarrierInfoMap();
+    if (carriers.empty())
+        throw cRuntimeError("LteMacEnb::primeDcUplinkAccess: no component carrier configured");
+    for (const auto& [carrierKey, carrierInfo] : carriers)
+        enbSchedulerUl_->signalRac(ueId, carrierInfo.carrierFrequency);
 }
 
 void LteMacEnb::deleteQueues(MacNodeId nodeId)

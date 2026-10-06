@@ -2,6 +2,7 @@
 //                  Simu5G
 //
 // Authors: Giovanni Nardini, Giovanni Stea, Antonio Virdis (University of Pisa)
+// Contributors: Afshin Zanganeh and How-Hang Liu (Technical University of Dresden)
 //
 // This file is part of a software released under the license included in file
 // "license.pdf". Please read LICENSE and README files before using it.
@@ -127,6 +128,15 @@ void HandoverController::initialize(int stage)
 
         EV << "LtePhyUe::initialize - Attaching to eNodeB " << servingNodeId_ << endl;
         phy_->changeServingNode(servingNodeId_);
+        // nascTime / uplink FRER: nrMac2 is constructed before the
+        // DC-secondary Binder association exists, so LteMacUe::initialize()
+        // initially picks the primary serving cell.  Synchronize the second
+        // MAC with the cell selected above; otherwise DRB 4 enters nrMac2 but
+        // its UL grants and air frames still target the primary gNB.
+        if (isDcSecondary_ && servingNodeId_ != NODEID_NONE) {
+            mac_->doHandover(servingNodeId_);
+            fbGen_->handleHandover(servingNodeId_);
+        }
         // nascTime / FRER: initialize()'s first-attach path bypasses doHandover()
         // entirely, which is where AMC registration normally happens
         // (newAmc->attachUser()). Without this, gnb2's LteAmc never learns about

@@ -3,6 +3,7 @@
 //
 // Copyright (C) 2012-2021 Giovanni Nardini, Giovanni Stea, Antonio Virdis et al. (University of Pisa)
 // Copyright (C) 2022-2026 Giovanni Nardini, Giovanni Stea et al. (University of Pisa)
+// Contributors: Afshin Zanganeh and How-Hang Liu (Technical University of Dresden)
 //
 // This file is part of a software released under the license included in file
 // "license.pdf". Please read LICENSE and README files before using it.
@@ -967,6 +968,13 @@ bool LteMacUe::getLowestBackloggedFlow(MacCid& cid, unsigned int& priority)
 void LteMacUe::doHandover(MacNodeId targetEnb)
 {
     cellId_ = targetEnb;
+}
+
+void LteMacUe::primeDcUplinkAccess(MacNodeId targetEnb)
+{
+    Enter_Method("primeDcUplinkAccess");
+    cellId_ = targetEnb;
+    bsrTriggered_ = true;
 }
 
 void LteMacUe::deleteQueues(MacNodeId nodeId)

@@ -3,6 +3,7 @@
 //
 // Copyright (C) 2012-2021 Giovanni Nardini, Giovanni Stea, Antonio Virdis et al. (University of Pisa)
 // Copyright (C) 2022-2026 Giovanni Nardini, Giovanni Stea et al. (University of Pisa)
+// Contributors: Afshin Zanganeh and How-Hang Liu (Technical University of Dresden)
 //
 // This file is part of a software released under the license included in file
 // "license.pdf". Please read LICENSE and README files before using it.
@@ -198,6 +199,14 @@ class LteMacUe : public LteMacBase
 
     // update ID of the serving cell during handover
     virtual void doHandover(MacNodeId targetEnb);
+
+    /**
+     * nascTime / uplink FRER: prime a dedicated DC-secondary MAC for its
+     * first UL grant. The ordinary RAC state is keyed by UE node ID and is
+     * already owned by the primary MAC, so a second MAC with the same UE ID
+     * needs an explicit initial BSR trigger.
+     */
+    virtual void primeDcUplinkAccess(MacNodeId targetEnb);
 };
 
 } //namespace
